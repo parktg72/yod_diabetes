@@ -101,6 +101,21 @@ class VariableGenerator:
                 FROM analysis_data WHERE FALSE
             """)
 
+    def _create_t40_filtered(self):
+        """T40 사전 필터링 테이블 생성 — comorbidity/complication/CCI에서 재사용 (T40 1회 스캔)"""
+        self.dm.execute("""
+            CREATE OR REPLACE TABLE _t40_pre_index AS
+            SELECT t40.INDI_DSCM_NO, t40.MCEX_SICK_SYM
+            FROM T40 t40
+            INNER JOIN analysis_data ad
+                ON t40.INDI_DSCM_NO = ad.INDI_DSCM_NO
+                AND t40.MDCARE_STRT_DT <= ad.index_date
+        """)
+
+    def _drop_t40_filtered(self):
+        """T40 사전 필터링 임시 테이블 삭제"""
+        self.dm.execute("DROP TABLE IF EXISTS _t40_pre_index")
+
     def generate_comorbidities(self, cb=None):
         if cb: cb("동반질환 변수 생성 중...")
         selects = []
@@ -108,19 +123,12 @@ class VariableGenerator:
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
             selects.append(f"MAX(CASE WHEN {cond} THEN 1 ELSE 0 END) AS comor_{cname.lower()}")
 
-        # 코호트 대상자 + index_date 이전 청구만 먼저 CTE로 필터링하여 T40 전체 스캔 방지
+        # _t40_pre_index 재사용 (T40 1회 스캔으로 3개 변수 그룹 생성)
         self.dm.execute(f"""
             CREATE OR REPLACE TABLE comorbidity_vars AS
-            WITH t40_filtered AS (
-                SELECT t40.INDI_DSCM_NO, t40.MCEX_SICK_SYM
-                FROM T40 t40
-                INNER JOIN analysis_data ad
-                    ON t40.INDI_DSCM_NO = ad.INDI_DSCM_NO
-                    AND t40.MDCARE_STRT_DT <= ad.index_date
-            )
             SELECT ad.INDI_DSCM_NO, {', '.join(selects)}
             FROM analysis_data ad
-            LEFT JOIN t40_filtered t40 ON ad.INDI_DSCM_NO = t40.INDI_DSCM_NO
+            LEFT JOIN _t40_pre_index t40 ON ad.INDI_DSCM_NO = t40.INDI_DSCM_NO
             GROUP BY ad.INDI_DSCM_NO
         """)
 
@@ -131,19 +139,12 @@ class VariableGenerator:
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
             selects.append(f"MAX(CASE WHEN {cond} THEN 1 ELSE 0 END) AS comp_{cname.lower()}")
 
-        # 코호트 대상자 + index_date 이전 청구만 CTE로 필터링하여 T40 전체 스캔 방지
+        # _t40_pre_index 재사용
         self.dm.execute(f"""
             CREATE OR REPLACE TABLE complication_vars AS
-            WITH t40_filtered AS (
-                SELECT t40.INDI_DSCM_NO, t40.MCEX_SICK_SYM
-                FROM T40 t40
-                INNER JOIN analysis_data ad
-                    ON t40.INDI_DSCM_NO = ad.INDI_DSCM_NO
-                    AND t40.MDCARE_STRT_DT <= ad.index_date
-            )
             SELECT ad.INDI_DSCM_NO, {', '.join(selects)}
             FROM analysis_data ad
-            LEFT JOIN t40_filtered t40 ON ad.INDI_DSCM_NO = t40.INDI_DSCM_NO
+            LEFT JOIN _t40_pre_index t40 ON ad.INDI_DSCM_NO = t40.INDI_DSCM_NO
             GROUP BY ad.INDI_DSCM_NO
         """)
 
@@ -183,19 +184,12 @@ class VariableGenerator:
 
         sums = ' + '.join(f"COALESCE(cci_{c.lower()},0)" for c in CCI_CODES)
 
-        # CTE로 코호트 대상자 + index_date 이전 청구만 사전 필터링 (T40 전체 스캔 방지)
+        # _t40_pre_index 재사용
         self.dm.execute(f"""
             CREATE OR REPLACE TABLE cci_detail AS
-            WITH t40_filtered AS (
-                SELECT t40.INDI_DSCM_NO, t40.MCEX_SICK_SYM
-                FROM T40 t40
-                INNER JOIN analysis_data ad
-                    ON t40.INDI_DSCM_NO = ad.INDI_DSCM_NO
-                    AND t40.MDCARE_STRT_DT <= ad.index_date
-            )
             SELECT ad.INDI_DSCM_NO, {', '.join(selects)}
             FROM analysis_data ad
-            LEFT JOIN t40_filtered t40 ON ad.INDI_DSCM_NO = t40.INDI_DSCM_NO
+            LEFT JOIN _t40_pre_index t40 ON ad.INDI_DSCM_NO = t40.INDI_DSCM_NO
             GROUP BY ad.INDI_DSCM_NO
         """)
         self.dm.execute(f"""
@@ -239,6 +233,9 @@ class VariableGenerator:
         mem_manager.cleanup_after_step('demographics')
         self.generate_health_behaviors(cb)
         mem_manager.cleanup_after_step('health_behaviors')
+
+        # T40 사전 필터링 1회 생성 → comorbidity/complication/CCI에서 재사용 (3회 스캔→1회)
+        self._create_t40_filtered()
         self.generate_comorbidities(cb)
         mem_manager.cleanup_after_step('comorbidities')
         self.generate_dm_complications(cb)
@@ -246,7 +243,9 @@ class VariableGenerator:
         self.generate_dm_duration(cb)
         mem_manager.cleanup_after_step('duration')
         self.generate_cci(cb)
+        self._drop_t40_filtered()
         mem_manager.cleanup_after_step('cci')
+
         n = self.merge_all_variables(cb)
         mem_manager.cleanup_after_step('merge')
         if cb:

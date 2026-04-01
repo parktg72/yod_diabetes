@@ -28,9 +28,9 @@ class CohortBuilder:
     def step1_base_population(self, cb=None):
         """40-64세, 진입기간 2013-2016, 진입 전 1년 자격유지"""
         if cb: cb("Step 1: 기본 대상 인구 정의 중...")
-        es = self.settings.get('ENROLLMENT_START', 2013)
-        ee = self.settings.get('ENROLLMENT_END', 2016)
-        washout = self.settings.get('WASHOUT_YEARS', 1)
+        es = int(self.settings.get('ENROLLMENT_START', 2013))
+        ee = int(self.settings.get('ENROLLMENT_END', 2016))
+        washout = int(self.settings.get('WASHOUT_YEARS', 1))
 
         # 1) 진입기간(es~ee) 내 자격 보유자 후보 추출
         self.dm.execute(f"""
@@ -72,25 +72,24 @@ class CohortBuilder:
 
         # first_year 이후 청구만 포함 + 진입 이전 DM 청구 있는 환자 제외 (prevalent bias 방지)
         # 진입 전 T40/T20에 DM 청구 기록이 있으면 유병 당뇨로 간주하여 제외
-        self.dm.execute(f"""
-            CREATE OR REPLACE TABLE prevalent_dm AS
-            SELECT DISTINCT t40.INDI_DSCM_NO
-            FROM T40 t40
-            INNER JOIN base_population bp ON t40.INDI_DSCM_NO = bp.INDI_DSCM_NO
-            WHERE ({t1c} OR {t2c})
-              AND CAST(SUBSTR(t40.MDCARE_STRT_DT, 1, 4) AS INTEGER) < bp.first_year
-        """)
-
+        # T40 + T20을 UNION으로 통합하여 한 번에 중복 제거 (INSERT + NOT IN 패턴 제거)
         t1s = icd_like('t20.SICK_SYM1', DM_CODES['T1DM'])
         t2s = icd_like('t20.SICK_SYM1', DM_CODES['T2DM'])
         self.dm.execute(f"""
-            INSERT INTO prevalent_dm
-            SELECT DISTINCT t20.INDI_DSCM_NO
-            FROM T20 t20
-            INNER JOIN base_population bp ON t20.INDI_DSCM_NO = bp.INDI_DSCM_NO
-            WHERE ({t1s} OR {t2s})
-              AND CAST(SUBSTR(t20.MDCARE_STRT_DT, 1, 4) AS INTEGER) < bp.first_year
-              AND t20.INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM prevalent_dm)
+            CREATE OR REPLACE TABLE prevalent_dm AS
+            SELECT DISTINCT INDI_DSCM_NO FROM (
+                SELECT t40.INDI_DSCM_NO
+                FROM T40 t40
+                INNER JOIN base_population bp ON t40.INDI_DSCM_NO = bp.INDI_DSCM_NO
+                WHERE ({t1c} OR {t2c})
+                  AND CAST(SUBSTR(t40.MDCARE_STRT_DT, 1, 4) AS INTEGER) < bp.first_year
+                UNION ALL
+                SELECT t20.INDI_DSCM_NO
+                FROM T20 t20
+                INNER JOIN base_population bp ON t20.INDI_DSCM_NO = bp.INDI_DSCM_NO
+                WHERE ({t1s} OR {t2s})
+                  AND CAST(SUBSTR(t20.MDCARE_STRT_DT, 1, 4) AS INTEGER) < bp.first_year
+            )
         """)
 
         self.dm.execute(f"""
@@ -161,18 +160,24 @@ class CohortBuilder:
     def step4_classify_groups(self, cb=None):
         """노출군 분류: 외래2회+/입원1회+, T1+T2 동시보유 제외"""
         if cb: cb("Step 4: 노출군 분류 중...")
-        mo = self.settings.get('MIN_DM_CLAIMS_OUTPATIENT', 2)
-        mi = self.settings.get('MIN_DM_CLAIMS_INPATIENT', 1)
+        mo = int(self.settings.get('MIN_DM_CLAIMS_OUTPATIENT', 2))
+        mi = int(self.settings.get('MIN_DM_CLAIMS_INPATIENT', 1))
+
+        # 입원 CMN_KEY 사전 추출 (T20 반복 서브쿼리 방지)
+        self.dm.execute("""
+            CREATE OR REPLACE TABLE _inpatient_keys AS
+            SELECT DISTINCT CMN_KEY FROM T20 WHERE FORM_CD='02'
+        """)
 
         self.dm.execute(f"""
             CREATE OR REPLACE TABLE dm_patients AS
             WITH outpt AS (
                 SELECT INDI_DSCM_NO, dm_type, MIN(claim_date) AS first_dt, COUNT(DISTINCT claim_date) AS n
-                FROM dm_claims WHERE CMN_KEY NOT IN (SELECT CMN_KEY FROM T20 WHERE FORM_CD='02')
+                FROM dm_claims WHERE CMN_KEY NOT IN (SELECT CMN_KEY FROM _inpatient_keys)
                 GROUP BY INDI_DSCM_NO, dm_type
             ), inpt AS (
                 SELECT INDI_DSCM_NO, dm_type, MIN(claim_date) AS first_dt, COUNT(DISTINCT claim_date) AS n
-                FROM dm_claims WHERE CMN_KEY IN (SELECT CMN_KEY FROM T20 WHERE FORM_CD='02')
+                FROM dm_claims WHERE CMN_KEY IN (SELECT CMN_KEY FROM _inpatient_keys)
                 GROUP BY INDI_DSCM_NO, dm_type
             )
             SELECT COALESCE(o.INDI_DSCM_NO, i.INDI_DSCM_NO) AS INDI_DSCM_NO,
@@ -181,6 +186,9 @@ class CohortBuilder:
             FROM outpt o FULL OUTER JOIN inpt i ON o.INDI_DSCM_NO=i.INDI_DSCM_NO AND o.dm_type=i.dm_type
             WHERE COALESCE(o.n,0) >= {mo} OR COALESCE(i.n,0) >= {mi}
         """)
+
+        # 임시 테이블 정리
+        self.dm.execute("DROP TABLE IF EXISTS _inpatient_keys")
 
         # T1+T2 동시 보유자 제외
         self.dm.execute("""
@@ -242,44 +250,38 @@ class CohortBuilder:
         """
         if cb: cb("Step 5: 기존 치매 및 항치매약 제외 중...")
 
-        # 진단 제외: T40 (상병내역)
+        # 진단 제외: T40(상병내역) + T20(주상병) UNION으로 통합 중복 제거
         dc40 = icd_like('t40.MCEX_SICK_SYM', DEMENTIA_CODES['ALL_CAUSE'])
-        self.dm.execute(f"""
-            CREATE OR REPLACE TABLE excl_dementia_dx AS
-            SELECT DISTINCT t40.INDI_DSCM_NO FROM T40 t40
-            INNER JOIN exposure_groups eg ON t40.INDI_DSCM_NO=eg.INDI_DSCM_NO
-            WHERE {dc40} AND t40.MDCARE_STRT_DT <= eg.index_date
-        """)
-
-        # 진단 제외 추가: T20 (진료명세서 주상병 SICK_SYM1)
         dc20 = icd_like('t20.SICK_SYM1', DEMENTIA_CODES['ALL_CAUSE'])
         self.dm.execute(f"""
-            INSERT INTO excl_dementia_dx
-            SELECT DISTINCT t20.INDI_DSCM_NO FROM T20 t20
-            INNER JOIN exposure_groups eg ON t20.INDI_DSCM_NO=eg.INDI_DSCM_NO
-            WHERE {dc20} AND t20.MDCARE_STRT_DT <= eg.index_date
-              AND t20.INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM excl_dementia_dx)
+            CREATE OR REPLACE TABLE excl_dementia_dx AS
+            SELECT DISTINCT INDI_DSCM_NO FROM (
+                SELECT t40.INDI_DSCM_NO FROM T40 t40
+                INNER JOIN exposure_groups eg ON t40.INDI_DSCM_NO=eg.INDI_DSCM_NO
+                WHERE {dc40} AND t40.MDCARE_STRT_DT <= eg.index_date
+                UNION ALL
+                SELECT t20.INDI_DSCM_NO FROM T20 t20
+                INNER JOIN exposure_groups eg ON t20.INDI_DSCM_NO=eg.INDI_DSCM_NO
+                WHERE {dc20} AND t20.MDCARE_STRT_DT <= eg.index_date
+            )
         """)
 
         dl = "'" + "','".join(DEMENTIA_DRUG_CODES) + "'"
 
-        # 약물 제외: T30 (진료내역)
+        # 약물 제외: T30(진료내역) + T60(처방전내역) UNION으로 통합 중복 제거
         self.dm.execute(f"""
             CREATE OR REPLACE TABLE excl_dementia_drug AS
-            SELECT DISTINCT t30.INDI_DSCM_NO FROM T30 t30
-            INNER JOIN exposure_groups eg ON t30.INDI_DSCM_NO=eg.INDI_DSCM_NO
-            WHERE (SUBSTR(t30.WK_COMPN_CD,1,6) IN ({dl}) OR SUBSTR(t30.RVSN_WK_COMPN_CD,1,6) IN ({dl}))
-              AND t30.MDCARE_STRT_DT <= eg.index_date
-        """)
-
-        # 약물 제외 추가: T60 (처방전내역)
-        self.dm.execute(f"""
-            INSERT INTO excl_dementia_drug
-            SELECT DISTINCT t60.INDI_DSCM_NO FROM T60 t60
-            INNER JOIN exposure_groups eg ON t60.INDI_DSCM_NO=eg.INDI_DSCM_NO
-            WHERE (SUBSTR(t60.GNL_NM_CD,1,6) IN ({dl}) OR SUBSTR(t60.RVSN_WK_COMPN_CD,1,6) IN ({dl}))
-              AND t60.MDCARE_STRT_DT <= eg.index_date
-              AND t60.INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM excl_dementia_drug)
+            SELECT DISTINCT INDI_DSCM_NO FROM (
+                SELECT t30.INDI_DSCM_NO FROM T30 t30
+                INNER JOIN exposure_groups eg ON t30.INDI_DSCM_NO=eg.INDI_DSCM_NO
+                WHERE (SUBSTR(t30.WK_COMPN_CD,1,6) IN ({dl}) OR SUBSTR(t30.RVSN_WK_COMPN_CD,1,6) IN ({dl}))
+                  AND t30.MDCARE_STRT_DT <= eg.index_date
+                UNION ALL
+                SELECT t60.INDI_DSCM_NO FROM T60 t60
+                INNER JOIN exposure_groups eg ON t60.INDI_DSCM_NO=eg.INDI_DSCM_NO
+                WHERE (SUBSTR(t60.GNL_NM_CD,1,6) IN ({dl}) OR SUBSTR(t60.RVSN_WK_COMPN_CD,1,6) IN ({dl}))
+                  AND t60.MDCARE_STRT_DT <= eg.index_date
+            )
         """)
 
         self.dm.execute("""
@@ -306,8 +308,8 @@ class CohortBuilder:
     def step6_outcomes(self, cb=None):
         """결과변수 식별 + 65세 도달 censoring"""
         if cb: cb("Step 6: 결과변수 + censoring 처리 중...")
-        ey = self.settings['STUDY_END_YEAR']
-        yod = self.settings['YOD_AGE_CUTOFF']
+        ey = int(self.settings['STUDY_END_YEAR'])
+        yod = int(self.settings['YOD_AGE_CUTOFF'])
 
         # 결과변수: T40(상병내역)과 T20(진료명세서 주상병) 모두에서 치매 진단 확인
         for oname, codes in DEMENTIA_CODES.items():

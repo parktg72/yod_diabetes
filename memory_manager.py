@@ -176,6 +176,7 @@ class GPUManager:
         self.gpu_available = False
         self.gpu_name = 'N/A'
         self.gpu_total_mb = 0
+        self._fraction_set = False  # set_per_process_memory_fraction은 1회만 호출 가능
 
         if self.use_gpu:
             self._init_gpu()
@@ -239,16 +240,21 @@ class GPUManager:
             logger.debug(f"GPU 캐시 해제 실패: {e}")
 
     def set_memory_fraction(self, fraction):
-        """GPU 메모리 사용 비율 변경"""
+        """GPU 메모리 사용 비율 변경.
+        torch.cuda.set_per_process_memory_fraction()은 프로세스당 1회만 호출 가능.
+        """
         self.memory_fraction = max(0.1, min(fraction, 0.9))
         GPU_SETTINGS['GPU_MEMORY_FRACTION'] = self.memory_fraction
-        if self.gpu_available:
+        if self.gpu_available and not self._fraction_set:
             try:
                 import torch
                 torch.cuda.set_per_process_memory_fraction(self.memory_fraction, self.device_id)
-                logger.info(f"GPU 메모리 비율 변경: {self.memory_fraction*100:.0f}%")
+                self._fraction_set = True
+                logger.info(f"GPU 메모리 비율 설정: {self.memory_fraction*100:.0f}%")
             except Exception as e:
                 logger.warning(f"GPU 비율 변경 실패: {e}")
+        elif self._fraction_set:
+            logger.info(f"GPU 비율 설정값 업데이트: {self.memory_fraction*100:.0f}% (재적용 불가, 재시작 필요)")
 
 
 class ChunkController:

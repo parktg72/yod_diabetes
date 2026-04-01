@@ -508,8 +508,11 @@ class SASFileLoader:
         if not isinstance(delimiter, str) or len(delimiter) != 1:
             raise ValueError(f"delimiter는 단일 문자여야 합니다: {delimiter!r}")
         duckdb_storage.drop_table(table_name)
-        # csv_path와 delimiter를 DuckDB 파라미터로 전달
-        safe_path = csv_path.as_posix().replace("'", "''")
+        # 경로 검증: SQL 인젝션 벡터 차단 (세미콜론, 코멘트, 따옴표 이스케이프)
+        path_str = csv_path.as_posix()
+        if any(seq in path_str for seq in [';', '--', '/*']):
+            raise ValueError(f"CSV 경로에 허용되지 않는 문자 포함: {path_str[:100]}")
+        safe_path = path_str.replace("'", "''")
         safe_delim = delimiter.replace("'", "''")
         duckdb_storage.execute(f"""
             CREATE TABLE {table_name} AS

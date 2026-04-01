@@ -583,10 +583,9 @@ class StatisticalAnalyzer:
 
                 if is_competing.sum() > 0:
                     comp_times = df_cr.loc[is_competing, T].values
-                    g_at_event = np.array([
-                        float(kmf_g.predict(t)) for t in comp_times
-                    ])
-                    g_at_max = float(kmf_g.predict(max_time))
+                    # 벡터화: O(n) 루프 → 단일 predict 호출로 성능 개선
+                    g_at_event = kmf_g.predict(comp_times).values
+                    g_at_max = float(kmf_g.predict(max_time).iloc[0])
                     # Fine-Gray IPCW: G(t)/G(t_j) — 시간이 지날수록 기여 감소 (≤ 1)
                     weights = np.maximum(g_at_max, 1e-10) / np.maximum(g_at_event, 1e-10)
                     weights = np.clip(weights, 0.01, 1.0)

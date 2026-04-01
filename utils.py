@@ -8,14 +8,17 @@ from config import APP_SETTINGS
 
 def setup_logging(log_dir='.'):
     log_path = Path(log_dir) / APP_SETTINGS['LOG_FILE']
-    logging.basicConfig(
-        level=logging.INFO,
-        format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-        handlers=[
-            logging.FileHandler(log_path, encoding='utf-8'),
-            logging.StreamHandler(sys.stdout),
-        ]
-    )
+    root = logging.getLogger()
+    # 이미 핸들러가 설정된 경우 중복 추가 방지
+    if not root.handlers:
+        root.setLevel(logging.INFO)
+        fmt = logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s')
+        fh = logging.FileHandler(log_path, encoding='utf-8')
+        fh.setFormatter(fmt)
+        sh = logging.StreamHandler(sys.stdout)
+        sh.setFormatter(fmt)
+        root.addHandler(fh)
+        root.addHandler(sh)
     return logging.getLogger(__name__)
 
 def timer(func):

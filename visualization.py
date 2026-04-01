@@ -86,7 +86,9 @@ class Visualizer:
         ax.set_ylabel('Survival Probability', fontsize=14)
         ax.set_title(title, fontsize=16, fontweight='bold')
         ax.legend(fontsize=12, loc='lower left')
-        ax.set_ylim(0.8, 1.01)
+        # 데이터 기반 동적 y축 하한 (자동 범위에 마진 적용)
+        auto_ymin = ax.get_ylim()[0]
+        ax.set_ylim(max(0, auto_ymin - 0.02), 1.01)
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
         p = self.out / filename

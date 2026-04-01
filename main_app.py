@@ -844,52 +844,11 @@ class MainWindow(QMainWindow):
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.warning(self, "샘플링 적용", sampling_note)
 
-        viz = Visualizer(str(self.results_dir))
-        try:
-            # KM 시각화용 데이터: 노출군별 층화 샘플링 (그룹당 최대 12,500건)
-            km_sample = self.dm.query("""
-                SELECT exposure_group, follow_up_years, dementia_event, ad_event, vad_event
-                FROM (
-                    SELECT *, ROW_NUMBER() OVER (
-                        PARTITION BY exposure_group ORDER BY RANDOM()
-                    ) AS rn
-                    FROM final_analysis
-                    WHERE follow_up_days > 0
-                ) t
-                WHERE rn <= 12500
-            """)
-            viz.plot_km(km_sample, 'dementia_event', 'KM: All-cause YOD', 'km_allcause.png')
-            viz.plot_km(km_sample, 'ad_event', 'KM: AD', 'km_ad.png')
-            viz.plot_km(km_sample, 'vad_event', 'KM: VaD', 'km_vad.png')
-            del km_sample; import gc; gc.collect()
-        except Exception as e:
-            self.log(f"KM 오류: {e}")
-
-        if 'subgroup' in ar:
-            try:
-                viz.plot_forest(ar['subgroup'])
-            except Exception as e:
-                self.log(f"Forest plot 오류: {e}")
-        if 'psm' in ar:
-            try:
-                viz.plot_psm_balance(ar['psm'].get('balance', {}))
-            except Exception as e:
-                self.log(f"PSM balance plot 오류: {e}")
-
-        if 'competing_risks' in ar:
-            try:
-                for oc, oc_data in ar['competing_risks'].items():
-                    if isinstance(oc_data, dict) and 'cif_by_group' in oc_data:
-                        viz.plot_cif(oc_data['cif_by_group'],
-                                     title=f'CIF: {oc}', filename=f'cif_{oc}.png')
-            except Exception as e:
-                self.log(f"CIF plot 오류: {e}")
-
-        exporter = ResultsExporter(str(self.results_dir))
-        try:
-            exporter.export_all(ar)
-        except Exception as e:
-            self.log(f"결과 내보내기 오류: {e}")
+        # 시각화 + 내보내기 (GUI 비의존 모듈로 분리)
+        from analysis_runner import run_post_analysis
+        result = run_post_analysis(self.dm, ar, self.results_dir, log=self.log)
+        for err in result.get('errors', []):
+            self.log(err)
 
         self.log(f"분석 완료! 결과: {self.results_dir}")
         QMessageBox.information(self, "완료", f"분석 완료\n{self.results_dir}")
