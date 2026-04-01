@@ -5,11 +5,8 @@ RAM 모니터링, Pandas 메모리 누수 방지, GPU 제어, dtype 최적화
 
 import gc
 import os
-import sys
 import logging
 import psutil
-import numpy as np
-import pandas as pd
 from config import MEMORY_SETTINGS, GPU_SETTINGS, CHUNK_SETTINGS
 
 logger = logging.getLogger(__name__)
@@ -225,7 +222,8 @@ class GPUManager:
                 'free_mb': self.gpu_total_mb - allocated,
                 'fraction': self.memory_fraction,
             }
-        except Exception:
+        except Exception as e:
+            logger.debug(f"GPU 정보 조회 실패: {e}")
             return {'available': False, 'name': self.gpu_name, 'total_mb': self.gpu_total_mb,
                     'used_mb': 0, 'free_mb': 0}
 
@@ -237,8 +235,8 @@ class GPUManager:
             import torch
             torch.cuda.empty_cache()
             logger.info("GPU 캐시 해제됨")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"GPU 캐시 해제 실패: {e}")
 
     def set_memory_fraction(self, fraction):
         """GPU 메모리 사용 비율 변경"""

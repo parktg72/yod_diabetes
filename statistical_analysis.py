@@ -10,8 +10,8 @@ import numpy as np
 import pandas as pd
 from lifelines import CoxPHFitter, KaplanMeierFitter
 from lifelines.statistics import proportional_hazard_test
-from config import STUDY_SETTINGS, MEMORY_SETTINGS, DEMENTIA_DRUG_CODES
-from memory_manager import mem_manager, chunk_controller
+from config import STUDY_SETTINGS, DEMENTIA_DRUG_CODES
+from memory_manager import mem_manager
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,6 @@ class StatisticalAnalyzer:
             # DM 그룹은 전부 유지, NON_DM만 남은 예산으로 샘플링
             # → DM 분석 underpowered 방지 + 노출군 비율 왜곡 최소화
             dm_total = sum(c for g, c in group_counts.items() if g != 'NON_DM')
-            non_dm_cnt = group_counts.get('NON_DM', 0)
             non_dm_budget = max(max_rows - dm_total, 0)
 
             alloc = {}

@@ -1,5 +1,5 @@
 @echo off
-echo === NHIS YOD-DM Analyzer v2.0 Build ===
+echo === NHIS YOD-DM Analyzer v2.1 Build ===
 if not exist venv (python -m venv venv)
 call venv\Scripts\activate.bat
 pip install -r requirements.txt

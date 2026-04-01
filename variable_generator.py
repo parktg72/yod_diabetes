@@ -4,7 +4,7 @@ variable_generator.py - 공변량 생성 모듈
 """
 
 import logging
-from config import DM_COMPLICATION_CODES, COMORBIDITY_CODES, CCI_CODES, STUDY_SETTINGS
+from config import DM_COMPLICATION_CODES, COMORBIDITY_CODES, CCI_CODES
 from memory_manager import mem_manager
 from utils import icd_like
 
@@ -235,12 +235,20 @@ class VariableGenerator:
         return self.dm.storage.get_row_count('final_analysis')
 
     def generate_all(self, cb=None):
-        self.generate_demographics(cb); mem_manager.cleanup_after_step('demographics')
-        self.generate_health_behaviors(cb); mem_manager.cleanup_after_step('health_behaviors')
-        self.generate_comorbidities(cb); mem_manager.cleanup_after_step('comorbidities')
-        self.generate_dm_complications(cb); mem_manager.cleanup_after_step('complications')
-        self.generate_dm_duration(cb); mem_manager.cleanup_after_step('duration')
-        self.generate_cci(cb); mem_manager.cleanup_after_step('cci')
-        n = self.merge_all_variables(cb); mem_manager.cleanup_after_step('merge')
-        if cb: cb("모든 변수 생성 완료!")
+        self.generate_demographics(cb)
+        mem_manager.cleanup_after_step('demographics')
+        self.generate_health_behaviors(cb)
+        mem_manager.cleanup_after_step('health_behaviors')
+        self.generate_comorbidities(cb)
+        mem_manager.cleanup_after_step('comorbidities')
+        self.generate_dm_complications(cb)
+        mem_manager.cleanup_after_step('complications')
+        self.generate_dm_duration(cb)
+        mem_manager.cleanup_after_step('duration')
+        self.generate_cci(cb)
+        mem_manager.cleanup_after_step('cci')
+        n = self.merge_all_variables(cb)
+        mem_manager.cleanup_after_step('merge')
+        if cb:
+            cb("모든 변수 생성 완료!")
         return n

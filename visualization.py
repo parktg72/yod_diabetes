@@ -3,7 +3,6 @@ visualization.py - 시각화 (KM, Forest Plot, 코호트 흐름도, PSM 밸런�
 """
 
 import logging
-import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use('Agg')
@@ -54,7 +53,7 @@ def setup_korean_font():
 
     plt.rcParams['axes.unicode_minus'] = False
 
-setup_korean_font()
+_korean_font_initialized = False
 
 COLORS = {'T1DM': '#E74C3C', 'T2DM_OHA': '#3498DB', 'T2DM_INSULIN': '#F39C12', 'T2DM_NOMED': '#9B59B6', 'NON_DM': '#2ECC71'}
 LABELS = {'T1DM': 'T1DM', 'T2DM_OHA': 'T2DM (OHA)', 'T2DM_INSULIN': 'T2DM (Insulin)', 'T2DM_NOMED': 'T2DM (No Med)', 'NON_DM': 'Non-DM'}
@@ -62,6 +61,10 @@ LABELS = {'T1DM': 'T1DM', 'T2DM_OHA': 'T2DM (OHA)', 'T2DM_INSULIN': 'T2DM (Insul
 
 class Visualizer:
     def __init__(self, output_dir='./results'):
+        global _korean_font_initialized
+        if not _korean_font_initialized:
+            setup_korean_font()
+            _korean_font_initialized = True
         self.out = Path(output_dir)
         self.out.mkdir(parents=True, exist_ok=True)
 

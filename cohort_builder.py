@@ -206,7 +206,7 @@ class CohortBuilder:
             GROUP BY m.INDI_DSCM_NO
         """)
 
-        self.dm.execute(f"""
+        self.dm.execute("""
             CREATE OR REPLACE TABLE exposure_groups AS
             SELECT bp.INDI_DSCM_NO, bp.SEX_TYPE, bp.BYEAR,
                    CASE

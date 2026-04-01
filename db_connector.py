@@ -12,10 +12,14 @@ import duckdb
 import pandas as pd
 from pathlib import Path
 
-from config import APP_SETTINGS, DUCKDB_SETTINGS, EXAM_STRUCTURE, CHUNK_SETTINGS
-from memory_manager import mem_manager, chunk_controller, MemoryManager
+from config import DUCKDB_SETTINGS, EXAM_STRUCTURE
+from memory_manager import mem_manager, chunk_controller
 
 _VALID_TABLE_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+_READ_ONLY_FORBIDDEN = re.compile(
+    r'\b(DROP|DELETE|INSERT|UPDATE|CREATE|ALTER|EXEC|EXECUTE|GRANT|REVOKE|TRUNCATE)\b',
+    re.IGNORECASE
+)
 
 
 def _validate_table_name(name):
@@ -38,8 +42,14 @@ class DuckDBStorage:
         temp_dir = DUCKDB_SETTINGS.get('TEMP_DIRECTORY', './temp_duckdb')
         os.makedirs(temp_dir, exist_ok=True)
         self.conn = duckdb.connect(self.db_path)
-        self.conn.execute(f"SET memory_limit='{DUCKDB_SETTINGS['MEMORY_LIMIT']}'")
-        self.conn.execute(f"SET threads TO {DUCKDB_SETTINGS['THREADS']}")
+        mem_limit = DUCKDB_SETTINGS['MEMORY_LIMIT']
+        threads = DUCKDB_SETTINGS['THREADS']
+        if not re.match(r'^\d+(\.\d+)?(GB|MB|KB|B)$', str(mem_limit), re.IGNORECASE):
+            raise ValueError(f"유효하지 않은 MEMORY_LIMIT: {mem_limit!r}")
+        if not isinstance(threads, int) or threads < 1:
+            raise ValueError(f"유효하지 않은 THREADS: {threads!r}")
+        self.conn.execute(f"SET memory_limit='{mem_limit}'")
+        self.conn.execute(f"SET threads TO {threads}")
         self.conn.execute(f"SET temp_directory='{temp_dir}'")
         logger.info(f"DuckDB 연결됨: {self.db_path}")
         return self.conn
@@ -95,17 +105,28 @@ class HANAConnector:
         self.host = host
         self.port = int(port)
         self.user = user
-        self.password = password
+        # 보안: mutable bytearray로 저장하여 메모리에서 확실히 소거 가능
+        self._password_buf = bytearray(password.encode('utf-8')) if password else bytearray()
         self.conn = None
+
+    @property
+    def _password(self):
+        """패스워드 문자열 반환 (연결 시에만 사용)"""
+        return self._password_buf.decode('utf-8') if self._password_buf else ''
+
+    def _clear_password(self):
+        """메모리에서 패스워드 바이트를 확실히 소거"""
+        for i in range(len(self._password_buf)):
+            self._password_buf[i] = 0
+        self._password_buf = bytearray()
 
     def connect(self):
         try:
             from hdbcli import dbapi
             self.conn = dbapi.connect(
                 address=self.host, port=self.port,
-                user=self.user, password=self.password,
+                user=self.user, password=self._password,
             )
-            # 비밀번호는 연결 객체가 닫힐 때(close()) 소거 — 재연결 필요 시까지 유지
             logger.info(f"HANA DB 연결 성공: {self.host}:{self.port}")
             return True
         except ImportError:
@@ -135,9 +156,9 @@ class HANAConnector:
             self.conn = None
 
     def destroy(self):
-        """완전 종료: 연결 닫고 메모리에서 패스워드 소거"""
+        """완전 종료: 연결 닫고 메모리에서 패스워드 바이트 소거"""
         self.close()
-        self.password = None
+        self._clear_password()
 
     # -------------------------------------------------------
     # 스키마/테이블/컬럼 검색 기능
@@ -418,7 +439,7 @@ class SASFileLoader:
             raise ValueError(f"delimiter는 단일 문자여야 합니다: {delimiter!r}")
         duckdb_storage.drop_table(table_name)
         # csv_path와 delimiter를 DuckDB 파라미터로 전달
-        safe_path = str(csv_path).replace("'", "''")
+        safe_path = csv_path.as_posix().replace("'", "''")
         safe_delim = delimiter.replace("'", "''")
         duckdb_storage.execute(f"""
             CREATE TABLE {table_name} AS
@@ -448,7 +469,6 @@ class ExamDataMerger:
 
         self.storage.drop_table('GJ_RESULT')
         common_cols = self.es['RESULT_COMMON_COLS']
-        col_str = ', '.join(common_cols)
         first = True
 
         # 2002-2017 통합 테이블 처리
@@ -615,8 +635,11 @@ class ExamDataMerger:
         """DuckDB 테이블의 컬럼명 목록 반환"""
         try:
             _validate_table_name(table_name)
-            df = self.storage.execute_df(f"SELECT * FROM {table_name} LIMIT 0")
-            return list(df.columns)
+            result = self.storage.execute(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+                [table_name]
+            )
+            return [row[0] for row in result.fetchall()]
         except Exception as e:
             logger.warning(f"컬럼 조회 실패 ({table_name}): {e}")
             return []
@@ -736,10 +759,15 @@ class DataManager:
         return info
 
     def query(self, sql):
+        """읽기 전용 쿼리 — DDL/DML 차단"""
+        if _READ_ONLY_FORBIDDEN.search(sql):
+            raise ValueError(f"읽기 전용 쿼리에서 DDL/DML 사용 불가: {sql[:100]}")
         return self.storage.execute_df(sql)
 
     def query_safe(self, sql, max_rows=None):
-        """메모리 안전 쿼리 — max_rows 초과 시 자동 LIMIT"""
+        """메모리 안전 읽기 전용 쿼리 — DDL/DML 차단 + max_rows 초과 시 자동 LIMIT"""
+        if _READ_ONLY_FORBIDDEN.search(sql):
+            raise ValueError(f"읽기 전용 쿼리에서 DDL/DML 사용 불가: {sql[:100]}")
         import re
         if max_rows is None:
             max_rows = mem_manager.get_safe_analysis_rows()

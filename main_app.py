@@ -11,7 +11,7 @@ from PyQt5.QtWidgets import (
     QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
     QLabel, QLineEdit, QPushButton, QTextEdit, QProgressBar,
     QFileDialog, QComboBox, QTableWidget, QTableWidgetItem,
-    QMessageBox, QCheckBox, QSpinBox, QStatusBar, QListWidget,
+    QMessageBox, QCheckBox, QSpinBox, QStatusBar,
     QSplitter, QTreeWidget, QTreeWidgetItem, QInputDialog
 )
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
@@ -25,7 +25,7 @@ from statistical_analysis import StatisticalAnalyzer
 from visualization import Visualizer
 from memory_manager import mem_manager, gpu_manager, chunk_controller
 from results_exporter import ResultsExporter
-from utils import setup_logging, format_number, format_bytes, get_disk_usage
+from utils import setup_logging, format_number
 
 logger = logging.getLogger(__name__)
 
@@ -44,14 +44,19 @@ class WorkerThread(QThread):
 
     def cancel(self):
         self._cancelled = True
+        self.requestInterruption()
+
+    @property
+    def is_cancelled(self):
+        return self._cancelled or self.isInterruptionRequested()
 
     def run(self):
         try:
             result = self.func(*self.args, progress_callback=lambda m: self.progress.emit(m), **self.kwargs)
-            if not self._cancelled:
+            if not self.is_cancelled:
                 self.finished.emit({'result': result})
         except Exception as e:
-            if not self._cancelled:
+            if not self.is_cancelled:
                 self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
@@ -987,7 +992,12 @@ class MainWindow(QMainWindow):
             p = viz.plot_km(df)
             del df; import gc; gc.collect()
             self.log(f"KM: {p}")
-            if sys.platform == 'win32': os.startfile(p)
+            if sys.platform == 'win32' and p:
+                rp = Path(p).resolve()
+                if rp.is_relative_to(self.results_dir.resolve()):
+                    os.startfile(p)
+                else:
+                    logger.warning(f"결과 디렉토리 외부 경로 차단: {p}")
         except Exception as e:
             QMessageBox.warning(self, "오류", str(e))
 
@@ -996,7 +1006,12 @@ class MainWindow(QMainWindow):
         if 'subgroup' in ar:
             viz = Visualizer(str(self.results_dir))
             p = viz.plot_forest(ar['subgroup'])
-            if p and sys.platform == 'win32': os.startfile(p)
+            if p and sys.platform == 'win32':
+                rp = Path(p).resolve()
+                if rp.is_relative_to(self.results_dir.resolve()):
+                    os.startfile(p)
+                else:
+                    logger.warning(f"결과 디렉토리 외부 경로 차단: {p}")
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
