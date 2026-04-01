@@ -15,4 +15,5 @@ results/
 *.log
 venv/
 .env
+.omc/
 *.sas7bdat

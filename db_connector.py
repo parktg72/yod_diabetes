@@ -259,6 +259,22 @@ class HANAConnector:
     # -------------------------------------------------------
     # 데이터 적재
     # -------------------------------------------------------
+    @staticmethod
+    def _validate_where_clause(clause):
+        """WHERE 절 기본 검증 — 위험한 SQL 구문 차단"""
+        if not clause:
+            return clause
+        forbidden = re.compile(
+            r'\b(DROP|DELETE|INSERT|UPDATE|CREATE|ALTER|EXEC|EXECUTE|GRANT|REVOKE|TRUNCATE)\b',
+            re.IGNORECASE
+        )
+        if forbidden.search(clause):
+            raise ValueError(f"허용되지 않는 SQL 구문 포함: {clause[:100]}")
+        # 세미콜론으로 다중 구문 방지
+        if ';' in clause:
+            raise ValueError("WHERE 절에 세미콜론 사용 불가")
+        return clause
+
     def fetch_table_chunked(self, table_name, schema_name, columns=None,
                             where_clause=None, chunk_size=None):
         if chunk_size is None:
@@ -269,6 +285,7 @@ class HANAConnector:
         from_clause = f'"{schema_name}"."{table_name}"' if schema_name else f'"{table_name}"'
         query = f'SELECT {col_str} FROM {from_clause}'
         if where_clause:
+            self._validate_where_clause(where_clause)
             query += f' WHERE {where_clause}'
 
         cursor = self.conn.cursor()
@@ -341,6 +358,7 @@ class SASFileLoader:
 
     def load_sas_to_duckdb(self, sas_path, duckdb_storage, table_name,
                            columns=None, progress_callback=None):
+        _validate_table_name(table_name)
         import pyreadstat
         sas_path = Path(sas_path)
         if not sas_path.exists():
@@ -391,6 +409,7 @@ class SASFileLoader:
 
     def load_csv_to_duckdb(self, csv_path, duckdb_storage, table_name,
                            delimiter=',', progress_callback=None):
+        _validate_table_name(table_name)
         csv_path = Path(csv_path)
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV 파일 없음: {csv_path}")

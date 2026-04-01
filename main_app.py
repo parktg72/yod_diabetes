@@ -40,13 +40,19 @@ class WorkerThread(QThread):
         self.func = func
         self.args = args
         self.kwargs = kwargs
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         try:
             result = self.func(*self.args, progress_callback=lambda m: self.progress.emit(m), **self.kwargs)
-            self.finished.emit({'result': result})
+            if not self._cancelled:
+                self.finished.emit({'result': result})
         except Exception as e:
-            self.error.emit(f"{e}\n{traceback.format_exc()}")
+            if not self._cancelled:
+                self.error.emit(f"{e}\n{traceback.format_exc()}")
 
 
 class MainWindow(QMainWindow):
@@ -234,8 +240,8 @@ class MainWindow(QMainWindow):
                 self.lbl_gpu.setText(f"GPU: {gi['name']} | {gi['used_mb']:.0f}/{gi['total_mb']:.0f} MB")
             else:
                 self.lbl_gpu.setText("GPU: 미감지 (CPU 모드)")
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"메모리 모니터 갱신 실패: {e}")
 
     # ===================== Tab 1: DB 연결 =====================
     def _tab_connection(self):
@@ -994,8 +1000,10 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         if self.worker and self.worker.isRunning():
+            self.worker.cancel()
             self.worker.quit()
-            self.worker.wait(3000)
+            if not self.worker.wait(3000):
+                logger.warning("워커 스레드 3초 내 종료 실패 — 강제 종료")
         if self.dm: self.dm.close()
         event.accept()
 

@@ -123,10 +123,9 @@ class StatisticalAnalyzer:
         if 'cci_score' in prepared.columns:
             prepared['cci_score'] = pd.to_numeric(prepared['cci_score'], errors='coerce').fillna(0)
         if 'dm_duration_years' in prepared.columns:
-            # NON_DM은 NULL (유병기간 없음) → -1로 구분, DM인데 NULL인 경우 0
+            # DM인데 NULL인 경우만 0으로 대체, NON_DM은 NaN 유지 (Cox에서 자동 제외)
             is_dm = prepared['exposure_group'] != 'NON_DM'
             prepared.loc[is_dm, 'dm_duration_years'] = prepared.loc[is_dm, 'dm_duration_years'].fillna(0)
-            prepared.loc[~is_dm, 'dm_duration_years'] = prepared.loc[~is_dm, 'dm_duration_years'].fillna(-1)
 
         if 'smoking_status' in prepared.columns:
             # NULL은 비흡연(0)이 아니라 결측(NaN)으로 유지 — 비흡연 오분류 방지
@@ -216,16 +215,16 @@ class StatisticalAnalyzer:
             df_prepared['exposure_group'].isin(['T1DM', 'T2DM_OHA', 'T2DM_INSULIN', 'T2DM_NOMED']),
             need_cols
         ].copy()
-        df_dm['is_t1'] = (df_dm['exposure_group'] == 'T1DM').astype('int8')
+        df_dm['is_t1dm'] = (df_dm['exposure_group'] == 'T1DM').astype('int8')
 
         ps_vars = ['age_at_index', 'male', 'income_q', 'comor_hypertension',
                     'comor_dyslipidemia', 'dm_duration_years']
         ps_vars = [c for c in ps_vars if c in df_dm.columns]
-        df_ps = df_dm[ps_vars + ['is_t1']].dropna()
+        df_ps = df_dm[ps_vars + ['is_t1dm']].dropna()
 
         # PSM 실행 가능 여부 검증: T1DM과 non-T1DM 모두 존재해야 함
-        n_treated = (df_ps['is_t1'] == 1).sum()
-        n_control = (df_ps['is_t1'] == 0).sum()
+        n_treated = (df_ps['is_t1dm'] == 1).sum()
+        n_control = (df_ps['is_t1dm'] == 0).sum()
         if n_treated < 2 or n_control < 2:
             msg = (f"PSM 스킵: T1DM={n_treated}명, non-T1DM={n_control}명 "
                    f"— 로지스틱 회귀를 위해 각 그룹 최소 2명 이상 필요")
@@ -235,7 +234,7 @@ class StatisticalAnalyzer:
             return self.results['psm']
 
         lr = LogisticRegression(max_iter=1000, random_state=42)
-        lr.fit(df_ps[ps_vars], df_ps['is_t1'])
+        lr.fit(df_ps[ps_vars], df_ps['is_t1dm'])
         df_ps = df_ps.copy()
         df_ps['ps'] = lr.predict_proba(df_ps[ps_vars])[:, 1]
         # PS를 클리핑하여 log(0) / log(inf) 방지
@@ -243,8 +242,8 @@ class StatisticalAnalyzer:
         del lr; gc.collect()
 
         ratio = STUDY_SETTINGS.get('PSM_RATIO', 3)
-        treated = df_ps[df_ps['is_t1'] == 1]
-        control = df_ps[df_ps['is_t1'] == 0]
+        treated = df_ps[df_ps['is_t1dm'] == 1]
+        control = df_ps[df_ps['is_t1dm'] == 0]
         lps_t = np.log(treated['ps'] / (1 - treated['ps']))
         lps_c = np.log(control['ps'] / (1 - control['ps']))
         # caliper: 0.2 × pooled SD of logit(PS) — treated/control 합산 분산 기준
@@ -295,10 +294,10 @@ class StatisticalAnalyzer:
         # Balance
         balance = {}
         for col in ps_vars:
-            tm = matched.loc[matched['is_t1'] == 1, col].mean()
-            cm = matched.loc[matched['is_t1'] == 0, col].mean()
-            ts = matched.loc[matched['is_t1'] == 1, col].std()
-            cs = matched.loc[matched['is_t1'] == 0, col].std()
+            tm = matched.loc[matched['is_t1dm'] == 1, col].mean()
+            cm = matched.loc[matched['is_t1dm'] == 0, col].mean()
+            ts = matched.loc[matched['is_t1dm'] == 1, col].std()
+            cs = matched.loc[matched['is_t1dm'] == 0, col].std()
             ps2 = np.sqrt((ts**2 + cs**2) / 2)
             smd = abs(tm - cm) / (ps2 if ps2 > 0 else 1)
             balance[col] = {'treated_mean': round(tm, 4), 'control_mean': round(cm, 4),
@@ -308,7 +307,7 @@ class StatisticalAnalyzer:
         psm_cox = {}
         for oc in ['dementia_event', 'ad_event', 'vad_event']:
             if oc in matched.columns:
-                d2 = matched[['is_t1', 'follow_up_years', oc]].dropna()
+                d2 = matched[['is_t1dm', 'follow_up_years', oc]].dropna()
                 d2 = d2[d2['follow_up_years'] > 0]
                 if len(d2) > 0 and d2[oc].sum() > 0:
                     try:
@@ -480,7 +479,17 @@ class StatisticalAnalyzer:
 
     def run_competing_risks(self, cb=None, df_prepared=None):
         """경쟁위험 분석: Aalen-Johansen CIF + IPCW Fine-Gray 근사
-        사망/탈퇴를 경쟁위험으로 처리
+
+        사망/탈퇴를 경쟁위험으로 처리.
+
+        [방법론 주의사항]
+        - CIF: Aalen-Johansen 추정기로 구현. 동률(ties) 처리는 표준 방식 적용.
+        - Fine-Gray: lifelines CoxPHFitter + IPCW 가중치 기반 근사 구현.
+          G(t)는 역KM 추정(검열=사건, 실제 사건=검열). 경쟁위험 대상자의 추적시간을
+          max_time으로 연장하고 G(t_max)/G(t_j) 가중치를 적용하는 고정 가중치 방식.
+        - 이 구현은 원 Fine-Gray (1999) 모형의 시간변동 가중치를 고정 가중치로
+          근사하므로, 논문 제출 전 R cmprsk::crr()와의 교차 검증을 권장합니다.
+        - 전체 SHR(subdistribution HR) 결과에 근사 방법론 고지가 포함됩니다.
         """
         if cb: cb("경쟁위험 분석 (Fine-Gray) 실행 중...")
         if df_prepared is None:
@@ -604,6 +613,8 @@ class StatisticalAnalyzer:
                 'cif_by_group': cif_by_group,
                 'fine_gray_summary': fg_summary,
                 'method': 'Aalen-Johansen CIF + IPCW Fine-Gray approximation',
+                'method_note': ('IPCW 고정 가중치 근사(G(t_max)/G(t_j)). '
+                                '논문 게재 시 R cmprsk::crr()로 교차 검증 필요.'),
                 'n_event': int((event_type == 1).sum()),
                 'n_competing': int((event_type == 2).sum()),
                 'n_censored': int((event_type == 0).sum()),
@@ -644,7 +655,9 @@ class StatisticalAnalyzer:
 
         sens['fine_gray'] = {
             'implemented': True,
-            'desc': 'Fine-Gray 경쟁위험모형 — IPCW 근사 기반으로 구현됨. run_competing_risks() 참조.',
+            'desc': ('Fine-Gray 경쟁위험모형 — IPCW 고정 가중치 근사 구현. '
+                     '논문 게재 시 R cmprsk::crr()와 교차 검증 권장. '
+                     'run_competing_risks() 참조.'),
         }
         self.results['sensitivity'] = sens
         gc.collect()

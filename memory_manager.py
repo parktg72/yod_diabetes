@@ -75,6 +75,10 @@ class MemoryManager:
     # ID성 컬럼: dtype 최적화 시 정밀도 손실 방지를 위해 제외
     _ID_COLUMNS = {'INDI_DSCM_NO', 'CMN_KEY', 'MCARE_DESC_LN_NO',
                    'MPRSC_GRANT_NO', 'MPRSC_SEQ_NO', 'MDCARE_SYM'}
+    # 분석 핵심 문자열 컬럼: category 변환 시 map()/astype() 충돌 방지
+    _NO_CATEGORY_COLUMNS = {'exposure_group', 'smoking_status', 'drinking_status',
+                            'dm_duration_cat', 'bmi_cat', 'cci_category',
+                            'insurance_type', 'age_group'}
 
     @staticmethod
     def optimize_dtypes(df):
@@ -120,6 +124,9 @@ class MemoryManager:
                         df[col] = df[col].astype('int32')
 
             elif col_type == 'object':
+                # 분석 핵심 컬럼은 category 변환 제외 (map/astype 충돌 방지)
+                if col in MemoryManager._NO_CATEGORY_COLUMNS:
+                    continue
                 # 문자열 카테고리화 (고유값이 적으면)
                 n_unique = df[col].nunique()
                 n_total = len(df[col])
