@@ -1,0 +1,752 @@
+"""
+db_connector.py - 데이터베이스 연결 및 디스크 기반 데이터 처리
+SAP HANA DB 스키마/테이블 검색 + SAS 파일 + DuckDB 로컬 저장소
+건강검진 연도별 분리(2018+) / 통합(2002-2017) 처리
+"""
+
+import os
+import gc
+import re
+import logging
+import duckdb
+import pandas as pd
+from pathlib import Path
+
+from config import APP_SETTINGS, DUCKDB_SETTINGS, EXAM_STRUCTURE, CHUNK_SETTINGS
+from memory_manager import mem_manager, chunk_controller, MemoryManager
+
+_VALID_TABLE_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*$')
+
+
+def _validate_table_name(name):
+    """테이블명 유효성 검증 (SQL 인젝션 방지)"""
+    if not _VALID_TABLE_RE.match(name):
+        raise ValueError(f"유효하지 않은 테이블명: {name!r}")
+    return name
+
+logger = logging.getLogger(__name__)
+
+
+class DuckDBStorage:
+    """DuckDB 기반 디스크 저장소"""
+
+    def __init__(self, db_path='./nhis_analysis.duckdb'):
+        self.db_path = db_path
+        self.conn = None
+
+    def connect(self):
+        temp_dir = DUCKDB_SETTINGS.get('TEMP_DIRECTORY', './temp_duckdb')
+        os.makedirs(temp_dir, exist_ok=True)
+        self.conn = duckdb.connect(self.db_path)
+        self.conn.execute(f"SET memory_limit='{DUCKDB_SETTINGS['MEMORY_LIMIT']}'")
+        self.conn.execute(f"SET threads TO {DUCKDB_SETTINGS['THREADS']}")
+        self.conn.execute(f"SET temp_directory='{temp_dir}'")
+        logger.info(f"DuckDB 연결됨: {self.db_path}")
+        return self.conn
+
+    def close(self):
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def execute(self, query, params=None):
+        if not self.conn:
+            self.connect()
+        return self.conn.execute(query, params) if params else self.conn.execute(query)
+
+    def execute_df(self, query, params=None):
+        result = self.execute(query, params)
+        return result.fetchdf()
+
+    def table_exists(self, table_name):
+        result = self.execute(
+            "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = ?",
+            [table_name]
+        )
+        return result.fetchone()[0] > 0
+
+    def get_row_count(self, table_name):
+        _validate_table_name(table_name)
+        if self.table_exists(table_name):
+            return self.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+        return 0
+
+    def drop_table(self, table_name):
+        _validate_table_name(table_name)
+        self.execute(f"DROP TABLE IF EXISTS {table_name}")
+
+    def create_index(self, table_name, columns, index_name=None):
+        _validate_table_name(table_name)
+        for col in columns:
+            _validate_table_name(col)
+        if not index_name:
+            index_name = f"idx_{table_name}_{'_'.join(columns)}"
+        _validate_table_name(index_name)
+        try:
+            self.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({', '.join(columns)})")
+        except Exception as e:
+            logger.warning(f"인덱스 생성 실패 ({index_name}): {e}")
+
+
+class HANAConnector:
+    """SAP HANA DB 연결 + 스키마/테이블 검색"""
+
+    def __init__(self, host, port, user, password):
+        self.host = host
+        self.port = int(port)
+        self.user = user
+        self.password = password
+        self.conn = None
+
+    def connect(self):
+        try:
+            from hdbcli import dbapi
+            self.conn = dbapi.connect(
+                address=self.host, port=self.port,
+                user=self.user, password=self.password,
+            )
+            # 비밀번호는 연결 객체가 닫힐 때(close()) 소거 — 재연결 필요 시까지 유지
+            logger.info(f"HANA DB 연결 성공: {self.host}:{self.port}")
+            return True
+        except ImportError:
+            raise ImportError("hdbcli 패키지 필요: pip install hdbcli")
+        except Exception as e:
+            logger.error(f"HANA DB 연결 실패: {e}")
+            raise
+
+    def test_connection(self):
+        try:
+            self.connect()
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT 'OK' FROM DUMMY")
+            result = cursor.fetchone()
+            cursor.close()
+            return result[0] == 'OK'
+        except Exception as e:
+            logger.error(f"연결 테스트 실패: {e}")
+            return False
+        finally:
+            self.close()
+
+    def close(self):
+        """연결 객체만 닫음 — 패스워드는 유지하여 재연결 가능"""
+        if self.conn:
+            self.conn.close()
+            self.conn = None
+
+    def destroy(self):
+        """완전 종료: 연결 닫고 메모리에서 패스워드 소거"""
+        self.close()
+        self.password = None
+
+    # -------------------------------------------------------
+    # 스키마/테이블/컬럼 검색 기능
+    # -------------------------------------------------------
+    def list_schemas(self):
+        """사용 가능한 스키마 목록 반환"""
+        if not self.conn:
+            self.connect()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT SCHEMA_NAME
+            FROM SYS.SCHEMAS
+            WHERE HAS_PRIVILEGES = 'TRUE'
+            ORDER BY SCHEMA_NAME
+        """)
+        schemas = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        logger.info(f"HANA 스키마 {len(schemas)}개 검색됨")
+        return schemas
+
+    def list_tables(self, schema_name):
+        """특정 스키마의 테이블 목록 반환"""
+        if not self.conn:
+            self.connect()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT TABLE_NAME, TABLE_TYPE
+            FROM SYS.TABLES
+            WHERE SCHEMA_NAME = ?
+            ORDER BY TABLE_NAME
+        """, (schema_name,))
+        tables = [{'name': row[0], 'type': row[1]} for row in cursor.fetchall()]
+        cursor.close()
+
+        # VIEW도 포함
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT VIEW_NAME, 'VIEW' AS TABLE_TYPE
+            FROM SYS.VIEWS
+            WHERE SCHEMA_NAME = ?
+            ORDER BY VIEW_NAME
+        """, (schema_name,))
+        views = [{'name': row[0], 'type': row[1]} for row in cursor.fetchall()]
+        cursor.close()
+
+        all_objects = tables + views
+        logger.info(f"HANA {schema_name}: 테이블 {len(tables)}개 + 뷰 {len(views)}개")
+        return all_objects
+
+    def list_columns(self, schema_name, table_name):
+        """테이블의 컬럼 목록 반환"""
+        if not self.conn:
+            self.connect()
+        cursor = self.conn.cursor()
+        cursor.execute("""
+            SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, IS_NULLABLE, COMMENTS
+            FROM SYS.TABLE_COLUMNS
+            WHERE SCHEMA_NAME = ? AND TABLE_NAME = ?
+            ORDER BY POSITION
+        """, (schema_name, table_name))
+        columns = [
+            {'name': row[0], 'type': row[1], 'length': row[2],
+             'nullable': row[3], 'comment': row[4]}
+            for row in cursor.fetchall()
+        ]
+        cursor.close()
+
+        if not columns:
+            # VIEW인 경우
+            cursor = self.conn.cursor()
+            cursor.execute("""
+                SELECT COLUMN_NAME, DATA_TYPE_NAME, LENGTH, IS_NULLABLE, COMMENTS
+                FROM SYS.VIEW_COLUMNS
+                WHERE SCHEMA_NAME = ? AND VIEW_NAME = ?
+                ORDER BY POSITION
+            """, (schema_name, table_name))
+            columns = [
+                {'name': row[0], 'type': row[1], 'length': row[2],
+                 'nullable': row[3], 'comment': row[4]}
+                for row in cursor.fetchall()
+            ]
+            cursor.close()
+
+        return columns
+
+    def search_tables(self, schema_name, keyword):
+        """테이블명에서 키워드 검색"""
+        if not self.conn:
+            self.connect()
+        cursor = self.conn.cursor()
+        keyword_upper = keyword.upper()
+        cursor.execute("""
+            SELECT TABLE_NAME FROM SYS.TABLES
+            WHERE SCHEMA_NAME = ? AND UPPER(TABLE_NAME) LIKE ?
+            UNION ALL
+            SELECT VIEW_NAME FROM SYS.VIEWS
+            WHERE SCHEMA_NAME = ? AND UPPER(VIEW_NAME) LIKE ?
+            ORDER BY 1
+        """, (schema_name, f'%{keyword_upper}%', schema_name, f'%{keyword_upper}%'))
+        results = [row[0] for row in cursor.fetchall()]
+        cursor.close()
+        return results
+
+    def get_table_row_count(self, schema_name, table_name):
+        """HANA 테이블 행 수 조회"""
+        if not self.conn:
+            self.connect()
+        cursor = self.conn.cursor()
+        try:
+            cursor.execute(f'SELECT COUNT(*) FROM "{schema_name}"."{table_name}"')
+            count = cursor.fetchone()[0]
+            cursor.close()
+            return count
+        except Exception as e:
+            logger.warning(f"HANA 행수 조회 실패 ({schema_name}.{table_name}): {e}")
+            cursor.close()
+            return -1
+
+    # -------------------------------------------------------
+    # 데이터 적재
+    # -------------------------------------------------------
+    def fetch_table_chunked(self, table_name, schema_name, columns=None,
+                            where_clause=None, chunk_size=None):
+        if chunk_size is None:
+            chunk_size = chunk_controller.get_chunk('hana')
+        if not self.conn:
+            self.connect()
+        col_str = ', '.join(f'"{c}"' for c in columns) if columns else '*'
+        from_clause = f'"{schema_name}"."{table_name}"' if schema_name else f'"{table_name}"'
+        query = f'SELECT {col_str} FROM {from_clause}'
+        if where_clause:
+            query += f' WHERE {where_clause}'
+
+        cursor = self.conn.cursor()
+        cursor.execute(query)
+        col_names = [desc[0] for desc in cursor.description]
+        total_rows = 0
+
+        while True:
+            rows = cursor.fetchmany(chunk_size)
+            if not rows:
+                break
+            chunk_df = pd.DataFrame(rows, columns=col_names)
+            total_rows += len(chunk_df)
+            yield chunk_df
+
+        cursor.close()
+        logger.info(f"HANA {schema_name}.{table_name}: {total_rows:,}건 로드")
+
+    def load_table_to_duckdb(self, hana_table, hana_schema, duckdb_storage,
+                              duckdb_table, columns=None, where_clause=None,
+                              chunk_size=None, progress_callback=None):
+        if chunk_size is None:
+            chunk_size = chunk_controller.get_chunk('hana')
+        first_chunk = True
+        total = 0
+
+        for chunk_df in self.fetch_table_chunked(
+            hana_table, hana_schema, columns, where_clause, chunk_size
+        ):
+            # dtype 최적화
+            chunk_df = mem_manager.optimize_dtypes(chunk_df)
+
+            if first_chunk:
+                duckdb_storage.drop_table(duckdb_table)
+                duckdb_storage.conn.register('_temp_chunk', chunk_df)
+                duckdb_storage.execute(f"CREATE TABLE {duckdb_table} AS SELECT * FROM _temp_chunk")
+                duckdb_storage.conn.unregister('_temp_chunk')
+                first_chunk = False
+            else:
+                duckdb_storage.conn.register('_temp_chunk', chunk_df)
+                duckdb_storage.execute(f"INSERT INTO {duckdb_table} SELECT * FROM _temp_chunk")
+                duckdb_storage.conn.unregister('_temp_chunk')
+
+            total += len(chunk_df)
+            # chunk_df 즉시 삭제 → Pandas 메모리 적층 방지
+            del chunk_df
+            gc.collect()
+
+            # 메모리 상태 체크 → 위험 시 chunk 자동 축소
+            chunk_controller.auto_adjust()
+
+            if progress_callback:
+                progress_callback(total, hana_table)
+
+        if duckdb_table.upper() in ['T20', 'T30', 'T40', 'T60']:
+            duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO'])
+            duckdb_storage.create_index(duckdb_table, ['CMN_KEY'])
+        elif duckdb_table.upper() == 'JK':
+            duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO', 'STD_YYYY'])
+
+        logger.info(f"DuckDB 적재: {duckdb_table} ({total:,}건)")
+        return total
+
+
+class SASFileLoader:
+    """SAS/CSV 파일 로더 (메모리 안전)"""
+
+    def __init__(self):
+        self.chunk_size = chunk_controller.get_chunk('sas')
+
+    def load_sas_to_duckdb(self, sas_path, duckdb_storage, table_name,
+                           columns=None, progress_callback=None):
+        import pyreadstat
+        sas_path = Path(sas_path)
+        if not sas_path.exists():
+            raise FileNotFoundError(f"SAS 파일 없음: {sas_path}")
+
+        duckdb_storage.drop_table(table_name)
+        first_chunk = True
+        total = 0
+        current_chunk = chunk_controller.get_chunk('sas')
+
+        reader = pyreadstat.read_file_in_chunks(
+            pyreadstat.read_sas7bdat, str(sas_path),
+            chunksize=current_chunk, usecols=columns,
+        )
+
+        for chunk_df, meta in reader:
+            # dtype 최적화 → 메모리 절감
+            chunk_df = mem_manager.optimize_dtypes(chunk_df)
+
+            if first_chunk:
+                duckdb_storage.conn.register('_temp_sas', chunk_df)
+                duckdb_storage.execute(f"CREATE TABLE {table_name} AS SELECT * FROM _temp_sas")
+                duckdb_storage.conn.unregister('_temp_sas')
+                first_chunk = False
+            else:
+                duckdb_storage.conn.register('_temp_sas', chunk_df)
+                duckdb_storage.execute(f"INSERT INTO {table_name} SELECT * FROM _temp_sas")
+                duckdb_storage.conn.unregister('_temp_sas')
+
+            total += len(chunk_df)
+            # ★ Pandas 메모리 적층 방지: chunk 즉시 삭제
+            del chunk_df
+            gc.collect()
+
+            # 메모리 자동 체크 & chunk 조절
+            chunk_controller.auto_adjust()
+
+            if progress_callback:
+                progress_callback(total, table_name)
+
+        if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
+            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO'])
+        elif table_name.upper() == 'JK':
+            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO', 'STD_YYYY'])
+
+        logger.info(f"SAS → DuckDB: {table_name} ({total:,}건)")
+        return total
+
+    def load_csv_to_duckdb(self, csv_path, duckdb_storage, table_name,
+                           delimiter=',', progress_callback=None):
+        csv_path = Path(csv_path)
+        if not csv_path.exists():
+            raise FileNotFoundError(f"CSV 파일 없음: {csv_path}")
+        # delimiter는 단일 문자만 허용 (SQL 인젝션 방지)
+        if not isinstance(delimiter, str) or len(delimiter) != 1:
+            raise ValueError(f"delimiter는 단일 문자여야 합니다: {delimiter!r}")
+        duckdb_storage.drop_table(table_name)
+        # csv_path와 delimiter를 DuckDB 파라미터로 전달
+        safe_path = str(csv_path).replace("'", "''")
+        safe_delim = delimiter.replace("'", "''")
+        duckdb_storage.execute(f"""
+            CREATE TABLE {table_name} AS
+            SELECT * FROM read_csv_auto('{safe_path}', delim='{safe_delim}', header=true, sample_size=10000)
+        """)
+        count = duckdb_storage.get_row_count(table_name)
+        if progress_callback:
+            progress_callback(count, table_name)
+        return count
+
+
+class ExamDataMerger:
+    """건강검진 데이터 연도별 병합 처리
+    2002~2017: 검진+문진 통합 → GJ_LEGACY
+    2018~: 각 연도별 검진결과 → GJ_RESULT_YYYY, 문진 → GJ_QUEST_YYYY
+    최종: GJ_RESULT (통합), GJ_QUEST (통합)
+    """
+
+    def __init__(self, duckdb_storage):
+        self.storage = duckdb_storage
+        self.es = EXAM_STRUCTURE
+
+    def merge_exam_results(self, progress_callback=None):
+        """모든 연도의 검진결과를 GJ_RESULT로 통합"""
+        if progress_callback:
+            progress_callback("검진결과 테이블 통합 중...")
+
+        self.storage.drop_table('GJ_RESULT')
+        common_cols = self.es['RESULT_COMMON_COLS']
+        col_str = ', '.join(common_cols)
+        first = True
+
+        # 2002-2017 통합 테이블 처리
+        if self.storage.table_exists('GJ_LEGACY'):
+            legacy_map = self.es['LEGACY_KEY_MAP']
+            select_parts = []
+            for col in common_cols:
+                if col in legacy_map:
+                    select_parts.append(f'"{legacy_map[col]}" AS "{col}"')
+                else:
+                    # 컬럼이 없으면 NULL
+                    select_parts.append(f'CASE WHEN TRUE THEN "{col}" END AS "{col}"')
+            legacy_select = ', '.join(select_parts)
+
+            try:
+                self.storage.execute(f"""
+                    CREATE TABLE GJ_RESULT AS
+                    SELECT {legacy_select} FROM GJ_LEGACY
+                """)
+                first = False
+                cnt = self.storage.get_row_count('GJ_RESULT')
+                logger.info(f"GJ_LEGACY → GJ_RESULT: {cnt:,}건")
+            except Exception as e:
+                logger.warning(f"GJ_LEGACY 처리 오류 (컬럼 불일치 가능): {e}")
+                # 폴백: RESULT_COMMON_COLS 전체 기준으로 존재 컬럼은 사용, 나머지는 NULL
+                # (소수 컬럼만 생성하면 downstream의 G1E_TG·G1E_HDL 등 참조 시 오류 발생)
+                legacy_existing = self._get_table_columns('GJ_LEGACY')
+                fallback_parts = []
+                for col in common_cols:
+                    mapped = legacy_map.get(col, col)
+                    if mapped in legacy_existing:
+                        fallback_parts.append(f'"{mapped}" AS "{col}"')
+                    elif col in legacy_existing:
+                        fallback_parts.append(f'"{col}"')
+                    else:
+                        fallback_parts.append(f'NULL AS "{col}"')
+                self.storage.execute(f"""
+                    CREATE TABLE GJ_RESULT AS
+                    SELECT {', '.join(fallback_parts)} FROM GJ_LEGACY
+                """)
+                first = False
+
+        # 2018+ 연도별 검진결과 테이블 처리
+        split_start, split_end = self.es['SPLIT_RANGE']
+        for year in range(split_start, split_end + 1):
+            tname = f'GJ_RESULT_{year}'
+            if not self.storage.table_exists(tname):
+                continue
+
+            # 해당 테이블에 실제 존재하는 컬럼만 선택
+            existing_cols = self._get_table_columns(tname)
+            select_cols = [c for c in common_cols if c in existing_cols]
+
+            if not select_cols:
+                continue
+
+            # 누락 컬럼은 NULL로 채움
+            select_parts = []
+            for col in common_cols:
+                if col in existing_cols:
+                    select_parts.append(f'"{col}"')
+                else:
+                    select_parts.append(f'NULL AS "{col}"')
+            select_str = ', '.join(select_parts)
+
+            if first:
+                self.storage.execute(f"CREATE TABLE GJ_RESULT AS SELECT {select_str} FROM {tname}")
+                first = False
+            else:
+                self.storage.execute(f"INSERT INTO GJ_RESULT SELECT {select_str} FROM {tname}")
+
+            cnt_year = self.storage.get_row_count(tname)
+            logger.info(f"{tname} → GJ_RESULT 추가: {cnt_year:,}건")
+
+        if not first:
+            self.storage.create_index('GJ_RESULT', ['INDI_DSCM_NO'])
+            total = self.storage.get_row_count('GJ_RESULT')
+            logger.info(f"GJ_RESULT 통합 완료: {total:,}건")
+            return total
+        return 0
+
+    def merge_exam_questionnaires(self, progress_callback=None):
+        """모든 연도의 문진을 GJ_QUEST로 통합"""
+        if progress_callback:
+            progress_callback("검진 문진 테이블 통합 중...")
+
+        self.storage.drop_table('GJ_QUEST')
+        common_cols = self.es['QUEST_COMMON_COLS']
+        first = True
+
+        # 2002-2017 통합 테이블에서 문진 변수 추출
+        # QUEST_COMMON_COLS 전체를 기준으로 생성하여 downstream 쿼리(Q_SMK_NOW_YN 등)의
+        # 컬럼 누락 오류를 방지. LEGACY_QUEST_MAP에 매핑된 컬럼은 레거시명으로 대체,
+        # 매핑 없는 컬럼은 NULL로 채워 스키마를 완전히 일치시킴.
+        if self.storage.table_exists('GJ_LEGACY'):
+            legacy_quest_map = self.es['LEGACY_QUEST_MAP']
+            existing_cols = self._get_table_columns('GJ_LEGACY')
+
+            select_parts = []
+            for col in common_cols:
+                if col == 'INDI_DSCM_NO':
+                    select_parts.append('INDI_DSCM_NO')
+                elif col == 'HC_BZ_YYYY':
+                    # 레거시 테이블에 EXMD_BZ_YYYY가 없을 수 있으므로 존재 확인
+                    if 'EXMD_BZ_YYYY' in existing_cols:
+                        select_parts.append('EXMD_BZ_YYYY AS HC_BZ_YYYY')
+                    else:
+                        select_parts.append('NULL AS HC_BZ_YYYY')
+                elif col in legacy_quest_map:
+                    legacy_col = legacy_quest_map[col]
+                    if legacy_col in existing_cols:
+                        select_parts.append(f'"{legacy_col}" AS "{col}"')
+                    else:
+                        select_parts.append(f'NULL AS "{col}"')
+                else:
+                    # LEGACY_QUEST_MAP에 없는 컬럼(Q_SMK_NOW_YN, Q_DRK_FRQ 등) → NULL
+                    select_parts.append(f'NULL AS "{col}"')
+
+            try:
+                self.storage.execute(f"""
+                    CREATE TABLE GJ_QUEST AS
+                    SELECT {', '.join(select_parts)} FROM GJ_LEGACY
+                """)
+                first = False
+            except Exception as e:
+                logger.warning(f"GJ_LEGACY 문진 추출 오류: {e}")
+
+        # 2018+ 연도별 문진 테이블
+        split_start, split_end = self.es['SPLIT_RANGE']
+        for year in range(split_start, split_end + 1):
+            tname = f'GJ_QUEST_{year}'
+            if not self.storage.table_exists(tname):
+                continue
+
+            existing_cols = self._get_table_columns(tname)
+            select_parts = []
+            for col in common_cols:
+                if col in existing_cols:
+                    select_parts.append(f'"{col}"')
+                else:
+                    select_parts.append(f'NULL AS "{col}"')
+            select_str = ', '.join(select_parts)
+
+            if first:
+                self.storage.execute(f"CREATE TABLE GJ_QUEST AS SELECT {select_str} FROM {tname}")
+                first = False
+            else:
+                self.storage.execute(f"INSERT INTO GJ_QUEST SELECT {select_str} FROM {tname}")
+
+        if not first:
+            self.storage.create_index('GJ_QUEST', ['INDI_DSCM_NO'])
+            total = self.storage.get_row_count('GJ_QUEST')
+            logger.info(f"GJ_QUEST 통합 완료: {total:,}건")
+            return total
+        return 0
+
+    def merge_all(self, progress_callback=None):
+        """검진결과 + 문진 모두 통합"""
+        n_result = self.merge_exam_results(progress_callback)
+        n_quest = self.merge_exam_questionnaires(progress_callback)
+        return n_result, n_quest
+
+    def _get_table_columns(self, table_name):
+        """DuckDB 테이블의 컬럼명 목록 반환"""
+        try:
+            _validate_table_name(table_name)
+            df = self.storage.execute_df(f"SELECT * FROM {table_name} LIMIT 0")
+            return list(df.columns)
+        except Exception as e:
+            logger.warning(f"컬럼 조회 실패 ({table_name}): {e}")
+            return []
+
+
+class DataManager:
+    """통합 데이터 관리자"""
+
+    def __init__(self, work_dir='./work'):
+        self.work_dir = Path(work_dir)
+        self.work_dir.mkdir(parents=True, exist_ok=True)
+        self.duckdb_path = str(self.work_dir / 'nhis_analysis.duckdb')
+        self.storage = DuckDBStorage(self.duckdb_path)
+        self.hana = None
+        self.sas_loader = SASFileLoader()
+        self.exam_merger = None
+        self.loaded_tables = {}
+
+    def init_storage(self):
+        self.storage.connect()
+        self.exam_merger = ExamDataMerger(self.storage)
+        return True
+
+    def reset_storage(self):
+        """기존 DuckDB 테이블 전체 삭제 후 재초기화 (stale data 방지)"""
+        self.storage.connect()
+        tables = self.storage.execute_df(
+            "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+        )
+        for tname in tables['table_name']:
+            _validate_table_name(tname)
+            self.storage.execute(f"DROP TABLE IF EXISTS {tname}")
+        self.loaded_tables.clear()
+        self.exam_merger = ExamDataMerger(self.storage)
+        logger.info("DuckDB 저장소 초기화 완료 (모든 테이블 삭제)")
+        return True
+
+    def connect_hana(self, host, port, user, password):
+        self.hana = HANAConnector(host, port, user, password)
+        return self.hana.test_connection()
+
+    def get_hana_schemas(self):
+        if not self.hana:
+            raise RuntimeError("HANA 미연결")
+        if not self.hana.conn:
+            self.hana.connect()
+        return self.hana.list_schemas()
+
+    def get_hana_tables(self, schema_name):
+        if not self.hana:
+            raise RuntimeError("HANA 미연결")
+        if not self.hana.conn:
+            self.hana.connect()
+        return self.hana.list_tables(schema_name)
+
+    def get_hana_columns(self, schema_name, table_name):
+        if not self.hana:
+            raise RuntimeError("HANA 미연결")
+        if not self.hana.conn:
+            self.hana.connect()
+        return self.hana.list_columns(schema_name, table_name)
+
+    def search_hana_tables(self, schema_name, keyword):
+        if not self.hana:
+            raise RuntimeError("HANA 미연결")
+        if not self.hana.conn:
+            self.hana.connect()
+        return self.hana.search_tables(schema_name, keyword)
+
+    def load_from_hana(self, table_name, hana_schema, hana_table=None,
+                       columns=None, where_clause=None, progress_callback=None):
+        if not self.hana:
+            raise RuntimeError("HANA 미연결")
+        if not self.hana.conn:
+            self.hana.connect()
+        if hana_table is None:
+            hana_table = table_name
+        count = self.hana.load_table_to_duckdb(
+            hana_table, hana_schema, self.storage,
+            table_name, columns, where_clause,
+            progress_callback=progress_callback
+        )
+        self.loaded_tables[table_name] = count
+        return count
+
+    def load_from_sas(self, table_name, sas_path, columns=None, progress_callback=None):
+        count = self.sas_loader.load_sas_to_duckdb(
+            sas_path, self.storage, table_name, columns, progress_callback
+        )
+        self.loaded_tables[table_name] = count
+        return count
+
+    def load_from_csv(self, table_name, csv_path, delimiter=',', progress_callback=None):
+        count = self.sas_loader.load_csv_to_duckdb(
+            csv_path, self.storage, table_name, delimiter, progress_callback
+        )
+        self.loaded_tables[table_name] = count
+        return count
+
+    def merge_exam_data(self, progress_callback=None):
+        """검진 데이터 연도별 병합 실행"""
+        if not self.exam_merger:
+            self.exam_merger = ExamDataMerger(self.storage)
+        return self.exam_merger.merge_all(progress_callback)
+
+    def get_table_info(self):
+        info = {}
+        try:
+            tables = self.storage.execute_df(
+                "SELECT table_name FROM information_schema.tables WHERE table_schema = 'main'"
+            )
+            for tname in tables['table_name']:
+                count = self.storage.get_row_count(tname)
+                info[tname] = {'rows': count}
+        except Exception as e:
+            logger.warning(f"테이블 정보 조회 실패: {e}")
+        return info
+
+    def query(self, sql):
+        return self.storage.execute_df(sql)
+
+    def query_safe(self, sql, max_rows=None):
+        """메모리 안전 쿼리 — max_rows 초과 시 자동 LIMIT"""
+        import re
+        if max_rows is None:
+            max_rows = mem_manager.get_safe_analysis_rows()
+        # 최외곽 SELECT에 LIMIT/SAMPLE이 있는지 확인 (서브쿼리 내부는 무시)
+        # 괄호 깊이가 0인 위치의 LIMIT 또는 USING SAMPLE 키워드만 감지
+        depth = 0
+        has_outer_limit = False
+        tokens = re.split(r'(\(|\))', sql.upper())
+        outer_sql = ''
+        for tok in tokens:
+            if tok == '(':
+                depth += 1
+            elif tok == ')':
+                depth -= 1
+            elif depth == 0:
+                outer_sql += tok
+        if re.search(r'\bLIMIT\b', outer_sql) or re.search(r'\bUSING\s+SAMPLE\b', outer_sql):
+            has_outer_limit = True
+        if has_outer_limit:
+            return self.storage.execute_df(sql)
+        return self.storage.execute_df(f"{sql} LIMIT {max_rows}")
+
+    def execute(self, sql):
+        self.storage.execute(sql)
+
+    def close(self):
+        self.storage.close()
+        if self.hana:
+            self.hana.destroy()  # 앱 종료 시 패스워드까지 완전 소거
