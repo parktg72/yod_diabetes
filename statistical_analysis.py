@@ -208,10 +208,9 @@ class StatisticalAnalyzer:
         return results
 
     def run_psm(self, cb=None, df_prepared=None):
-        """PSM: T1DM vs T2DM, 1:N 매칭 — matched_df 저장 안 함"""
+        """PSM: T1DM vs T2DM, 1:N 매칭 — matched_df 저장 안 함 (GPU 가속 지원)"""
         if cb: cb("PSM 실행 중...")
-        from sklearn.linear_model import LogisticRegression
-        from sklearn.neighbors import NearestNeighbors
+        from gpu_accelerator import get_logistic_regression, get_nearest_neighbors, is_gpu_enabled
 
         if df_prepared is None:
             df_prepared = self._prepare(self._load_data())
@@ -243,7 +242,9 @@ class StatisticalAnalyzer:
             self.results['psm'] = {'skipped': True, 'reason': msg}
             return self.results['psm']
 
-        lr = LogisticRegression(max_iter=1000, random_state=42)
+        lr = get_logistic_regression(max_iter=1000, random_state=42)
+        if is_gpu_enabled() and cb:
+            cb("PSM: GPU 가속 로지스틱 회귀 실행 중...")
         lr.fit(df_ps[ps_vars], df_ps['is_t1dm'])
         df_ps = df_ps.copy()
         df_ps['ps'] = lr.predict_proba(df_ps[ps_vars])[:, 1]
@@ -270,7 +271,7 @@ class StatisticalAnalyzer:
         # ratio보다 많은 후보를 탐색해 used_controls 소진으로 인한 누락 매칭 방지
         # ratio * 5 또는 control 전체 중 작은 값으로 후보 풀 확대
         search_k = min(len(control), max(ratio * 5, ratio + 10))
-        nn = NearestNeighbors(n_neighbors=search_k, metric='euclidean')
+        nn = get_nearest_neighbors(n_neighbors=search_k, metric='euclidean')
         nn.fit(lps_c.values.reshape(-1, 1))
         dists, idxs = nn.kneighbors(lps_t.values.reshape(-1, 1))
         del nn; gc.collect()
@@ -502,6 +503,10 @@ class StatisticalAnalyzer:
         - 전체 SHR(subdistribution HR) 결과에 근사 방법론 고지가 포함됩니다.
         """
         if cb: cb("경쟁위험 분석 (Fine-Gray) 실행 중...")
+        from gpu_accelerator import is_gpu_enabled, compute_cif_gpu
+        use_gpu_cif = is_gpu_enabled()
+        if use_gpu_cif and cb:
+            cb("경쟁위험 분석: GPU 가속 CIF 계산 활성화")
         if df_prepared is None:
             df_prepared = self._prepare(self._load_data())
 
@@ -557,7 +562,10 @@ class StatisticalAnalyzer:
                     continue
                 times_g = df_cr.loc[mask, T].values.astype(float)
                 events_g = event_type[mask]
-                ut, c1, c2 = self._compute_cif(times_g, events_g)
+                if use_gpu_cif:
+                    ut, c1, c2 = compute_cif_gpu(times_g, events_g)
+                else:
+                    ut, c1, c2 = self._compute_cif(times_g, events_g)
                 cif_by_group[group_name] = {
                     'times': ut.tolist(), 'cif_event': c1.tolist(),
                     'cif_competing': c2.tolist()
@@ -571,7 +579,10 @@ class StatisticalAnalyzer:
             if non_dm_mask.sum() >= 10:
                 times_g = df_cr.loc[non_dm_mask, T].values.astype(float)
                 events_g = event_type[non_dm_mask.values]
-                ut, c1, c2 = self._compute_cif(times_g, events_g)
+                if use_gpu_cif:
+                    ut, c1, c2 = compute_cif_gpu(times_g, events_g)
+                else:
+                    ut, c1, c2 = self._compute_cif(times_g, events_g)
                 cif_by_group['NON_DM'] = {
                     'times': ut.tolist(), 'cif_event': c1.tolist(),
                     'cif_competing': c2.tolist()
@@ -760,6 +771,13 @@ class StatisticalAnalyzer:
         df_prepared = self._prepare(raw)
         logger.info(f"분석 데이터 준비 완료: {len(df_prepared):,}건, "
                    f"{df_prepared.memory_usage(deep=True).sum() / 1024**2:.1f}MB")
+
+        from gpu_accelerator import get_gpu_status
+        gpu_info = get_gpu_status()
+        if gpu_info['gpu_enabled']:
+            logger.info(f"GPU 가속 활성화 — cupy: {gpu_info['cupy_available']}, "
+                       f"torch CUDA: {gpu_info['torch_cuda']}")
+            if cb: cb("GPU 가속 모드로 분석을 실행합니다.")
 
         # Table 1은 항상 생성
         self.generate_table1(cb, df_prepared)
