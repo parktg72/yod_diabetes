@@ -460,6 +460,7 @@ class DataLoadTab(QWidget):
         tables = [
             ('T20', '진료명세서'), ('T30', '진료내역'), ('T40', '상병내역'),
             ('T60', '처방전'), ('JK', '자격DB'), ('YK', '요양기관'),
+            ('DEATH', '사망(HHDT_DEATH)'),
             ('GJ_LEGACY', '검진(2002-2017 통합)'),
         ]
 

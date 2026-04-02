@@ -427,6 +427,10 @@ class HANAConnector:
             # dtype 최적화
             chunk_df = mem_manager.optimize_dtypes(chunk_df)
 
+            # DuckDB는 pandas category dtype을 지원하지 않음 → object로 복원
+            for col in chunk_df.select_dtypes(include=['category']).columns:
+                chunk_df[col] = chunk_df[col].astype('object')
+
             if first_chunk:
                 duckdb_storage.drop_table(duckdb_table)
                 duckdb_storage.conn.register('_temp_chunk', chunk_df)
@@ -454,6 +458,8 @@ class HANAConnector:
             duckdb_storage.create_index(duckdb_table, ['CMN_KEY'])
         elif duckdb_table.upper() == 'JK':
             duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO', 'STD_YYYY'])
+        elif duckdb_table.upper() == 'DEATH':
+            duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO'])
 
         logger.info(f"DuckDB 적재: {duckdb_table} ({total:,}건)")
         return total
