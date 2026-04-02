@@ -40,7 +40,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
                 FROM final_analysis
                 WHERE follow_up_days > 0
             ) t
-            WHERE rn <= 12500
+            WHERE rn <= 10000
         """)
         viz.plot_km(km_sample, 'dementia_event', 'KM: All-cause YOD', 'km_allcause.png')
         viz.plot_km(km_sample, 'ad_event', 'KM: AD', 'km_ad.png')

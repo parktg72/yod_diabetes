@@ -10,6 +10,7 @@ import numpy as np
 import pandas as pd
 from lifelines import CoxPHFitter, KaplanMeierFitter
 from lifelines.statistics import proportional_hazard_test
+from scipy import stats
 from config import STUDY_SETTINGS, DEMENTIA_DRUG_CODES
 from memory_manager import mem_manager
 
@@ -129,15 +130,17 @@ class StatisticalAnalyzer:
         if 'smoking_status' in prepared.columns:
             # NULL은 비흡연(0)이 아니라 결측(NaN)으로 유지 — 비흡연 오분류 방지
             smk = prepared['smoking_status']
-            prepared['smk_current'] = smk.map(lambda x: 1 if x == 'Current' else (0 if x in ('Former', 'Never') else float('nan'))).astype('float32')
-            prepared['smk_former']  = smk.map(lambda x: 1 if x == 'Former'  else (0 if x in ('Current', 'Never') else float('nan'))).astype('float32')
+            smk_known = smk.isin(['Current', 'Former', 'Never'])
+            prepared['smk_current'] = np.where(smk_known, (smk == 'Current').astype('float32'), np.nan).astype('float32')
+            prepared['smk_former'] = np.where(smk_known, (smk == 'Former').astype('float32'), np.nan).astype('float32')
             prepared['smk_missing'] = smk.isna().astype('int8')
 
         if 'drinking_status' in prepared.columns:
             # 음주 변수도 동일 패턴: 결측 지시변수 생성
             drk = prepared['drinking_status']
-            prepared['drk_heavy'] = drk.map(lambda x: 1 if x == 'Heavy' else (0 if x in ('Non', 'Mild', 'Moderate') else float('nan'))).astype('float32')
-            prepared['drk_moderate'] = drk.map(lambda x: 1 if x in ('Moderate', 'Heavy') else (0 if x in ('Non', 'Mild') else float('nan'))).astype('float32')
+            drk_known = drk.isin(['Non', 'Mild', 'Moderate', 'Heavy'])
+            prepared['drk_heavy'] = np.where(drk_known, (drk == 'Heavy').astype('float32'), np.nan).astype('float32')
+            prepared['drk_moderate'] = np.where(drk_known, drk.isin(['Moderate', 'Heavy']).astype('float32'), np.nan).astype('float32')
             prepared['drk_missing'] = drk.isna().astype('int8')
 
         comor_cols = [c for c in prepared.columns if c.startswith('comor_') or c.startswith('comp_')]
@@ -192,6 +195,14 @@ class StatisticalAnalyzer:
             finally:
                 del df_model
                 gc.collect()
+
+        # PH 검정 요약을 모델별로 취합하여 최상위에 저장
+        ph_combined = {}
+        for mname, entry in results.items():
+            if 'ph_test' in entry:
+                ph_combined[mname] = entry['ph_test']
+        if ph_combined:
+            results['ph_test_summary'] = ph_combined
 
         self.results[f'cox_{outcome}'] = results
         return results
@@ -621,6 +632,10 @@ class StatisticalAnalyzer:
             del df_cr, df_fg, event_type
             gc.collect()
 
+        results['_method_warning'] = (
+            "IPCW 고정 가중치 근사 방법 사용. "
+            "논문 게재 전 R cmprsk::crr() 교차 검증 필수."
+        )
         self.results['competing_risks'] = results
         return results
 
@@ -682,6 +697,58 @@ class StatisticalAnalyzer:
             for c in [x for x in gd.columns if x.startswith('comor_')]:
                 row[f'{c}_pct'] = round(pd.to_numeric(gd[c], errors='coerce').mean() * 100, 1)
             rows.append(row)
+
+        # --- P-value 계산: 그룹 간 통계 검정 ---
+        p_values = {}
+        # 연속변수: Kruskal-Wallis test
+        for col, lbl in [('age_at_index', 'Age'), ('bmi', 'BMI'), ('fbs', 'FBS'), ('cci_score', 'CCI')]:
+            if col not in df_prepared.columns:
+                continue
+            group_vals = []
+            for g in groups:
+                v = pd.to_numeric(df_prepared.loc[df_prepared['exposure_group'] == g, col], errors='coerce').dropna()
+                if len(v) > 0:
+                    group_vals.append(v.values)
+            if len(group_vals) >= 2:
+                try:
+                    _, pval = stats.kruskal(*group_vals)
+                    p_values[f'{lbl}_mean'] = round(pval, 4)
+                except Exception:
+                    p_values[f'{lbl}_mean'] = np.nan
+
+        # 이분형 변수: Chi-square test
+        # Male_pct
+        if 'male' in df_prepared.columns:
+            try:
+                ct = pd.crosstab(df_prepared['exposure_group'], df_prepared['male'])
+                if ct.shape[0] >= 2 and ct.shape[1] >= 2:
+                    _, pval, _, _ = stats.chi2_contingency(ct)
+                    p_values['Male_pct'] = round(pval, 4)
+            except Exception:
+                p_values['Male_pct'] = np.nan
+
+        # 동반질환 변수
+        comor_cols = [c for c in df_prepared.columns if c.startswith('comor_')]
+        for c in comor_cols:
+            try:
+                binary = pd.to_numeric(df_prepared[c], errors='coerce').fillna(0).astype(int)
+                ct = pd.crosstab(df_prepared['exposure_group'], binary)
+                if ct.shape[0] >= 2 and ct.shape[1] >= 2:
+                    _, pval, _, _ = stats.chi2_contingency(ct)
+                    p_values[f'{c}_pct'] = round(pval, 4)
+            except Exception:
+                p_values[f'{c}_pct'] = np.nan
+
+        # P_value 열 추가 (첫 번째 행에만 기록, 나머지 행은 빈 값)
+        for i, row in enumerate(rows):
+            if i == 0:
+                pv = {}
+                for key, val in p_values.items():
+                    pv[key] = val
+                row['P_value'] = '; '.join(f"{k}={v}" for k, v in pv.items())
+            else:
+                row['P_value'] = ''
+
         self.results['table1'] = pd.DataFrame(rows)
         return self.results['table1']
 

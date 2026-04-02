@@ -105,6 +105,30 @@ class ResultsExporter:
                 df.to_excel(writer, sheet_name=name[:31])
         return str(path)
 
+    def export_ph_tests(self, cox_results_all, filename='ph_tests.xlsx'):
+        """PH 가정 검정 결과 내보내기"""
+        sheets = {}
+        for cox_key, cox_data in cox_results_all.items():
+            if not isinstance(cox_data, dict):
+                continue
+            for model_name, model_data in cox_data.items():
+                if not isinstance(model_data, dict):
+                    continue
+                ph = model_data.get('ph_test')
+                if ph is not None and hasattr(ph, 'to_excel'):
+                    sheet_name = f'{cox_key}_{model_name}'[:31]
+                    sheets[sheet_name] = ph.copy()
+
+        if not sheets:
+            logger.warning("PH 검정 결과 내보내기 생략: 저장할 데이터 없음")
+            return None
+
+        path = self.output_dir / filename
+        with pd.ExcelWriter(path, engine='openpyxl') as writer:
+            for name, df in sheets.items():
+                df.to_excel(writer, sheet_name=name)
+        return str(path)
+
     def export_all(self, results, prefix=''):
         exported = []
         if 'table1' in results:
@@ -114,6 +138,12 @@ class ResultsExporter:
                 path = self.export_cox_results(results[key], f'{prefix}{key}.xlsx')
                 if path:
                     exported.append(path)
+        # PH test results
+        cox_all = {k: v for k, v in results.items() if k.startswith('cox_')}
+        if cox_all:
+            path = self.export_ph_tests(cox_all, f'{prefix}ph_tests.xlsx')
+            if path:
+                exported.append(path)
         if 'psm' in results:
             path = self.export_psm_results(results['psm'], f'{prefix}psm.xlsx')
             if path:

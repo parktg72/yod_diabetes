@@ -206,3 +206,68 @@ APP_SETTINGS = {
     'CHUNK_SIZE': 50000,           # 기본 chunk (조절 가능)
     'LOG_FILE': 'yod_analysis.log',
 }
+
+# ============================================================
+# 설정 저장/불러오기
+# ============================================================
+
+import json
+from pathlib import Path
+
+_SETTINGS_FILE = Path('./yod_settings.json')
+
+_SAVEABLE_SETTINGS = {
+    'STUDY_SETTINGS': STUDY_SETTINGS,
+    'MEMORY_SETTINGS': MEMORY_SETTINGS,
+    'GPU_SETTINGS': GPU_SETTINGS,
+    'CHUNK_SETTINGS': CHUNK_SETTINGS,
+    'DUCKDB_SETTINGS': DUCKDB_SETTINGS,
+    'APP_SETTINGS': APP_SETTINGS,
+}
+
+
+def save_settings(path=None):
+    """현재 설정을 JSON 파일로 저장"""
+    p = Path(path) if path else _SETTINGS_FILE
+    data = {}
+    for name, settings_dict in _SAVEABLE_SETTINGS.items():
+        # float('inf') is not JSON serializable — convert to string
+        serializable = {}
+        for k, v in settings_dict.items():
+            if isinstance(v, float) and v == float('inf'):
+                serializable[k] = "Infinity"
+            elif isinstance(v, list):
+                serializable[k] = [("Infinity" if isinstance(x, float) and x == float('inf') else x) for x in v]
+            else:
+                serializable[k] = v
+        data[name] = serializable
+    p.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding='utf-8')
+    return str(p)
+
+
+def load_settings(path=None):
+    """JSON 파일에서 설정 복원"""
+    p = Path(path) if path else _SETTINGS_FILE
+    if not p.exists():
+        return False
+    data = json.loads(p.read_text(encoding='utf-8'))
+    for name, settings_dict in _SAVEABLE_SETTINGS.items():
+        if name in data:
+            for k, v in data[name].items():
+                if k in settings_dict:
+                    # Restore Infinity
+                    if v == "Infinity":
+                        settings_dict[k] = float('inf')
+                    elif isinstance(v, list):
+                        settings_dict[k] = [(float('inf') if x == "Infinity" else x) for x in v]
+                    else:
+                        # 원래 타입 유지를 위해 type cast는 기본형만 적용
+                        orig = settings_dict[k]
+                        if orig is not None and not isinstance(v, type(orig)):
+                            try:
+                                settings_dict[k] = type(orig)(v)
+                            except (TypeError, ValueError):
+                                settings_dict[k] = v
+                        else:
+                            settings_dict[k] = v
+    return True

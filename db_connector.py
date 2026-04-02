@@ -7,6 +7,7 @@ SAP HANA DB 스키마/테이블 검색 + SAS 파일 + DuckDB 로컬 저장소
 import os
 import gc
 import re
+import time
 import logging
 import duckdb
 import pandas as pd
@@ -373,12 +374,29 @@ class HANAConnector:
                 f'SELECT {col_str} FROM {from_clause}{where_part}'
                 f' ORDER BY {order_key} LIMIT {chunk_size} OFFSET {offset}'
             )
-            cursor = self.conn.cursor()
-            try:
-                cursor.execute(paged_query)
-                rows = cursor.fetchall()
-            finally:
-                cursor.close()
+
+            # 청크 단위 재시도 (최대 3회, 지수 백오프)
+            rows = None
+            for attempt in range(3):
+                cursor = self.conn.cursor()
+                try:
+                    cursor.execute(paged_query)
+                    rows = cursor.fetchall()
+                    cursor.close()
+                    break  # 성공
+                except Exception as e:
+                    cursor.close()
+                    if attempt < 2:
+                        logger.warning(
+                            f"HANA 청크 조회 실패 (시도 {attempt + 1}/3): {e}"
+                        )
+                        time.sleep(2 ** attempt)
+                        try:
+                            self.connect()
+                        except Exception:
+                            pass
+                    else:
+                        raise  # 마지막 시도 실패 — 예외 전파
 
             if not rows:
                 break
@@ -498,30 +516,173 @@ class SASFileLoader:
         logger.info(f"SAS → DuckDB: {table_name} ({total:,}건)")
         return total
 
-    def load_csv_to_duckdb(self, csv_path, duckdb_storage, table_name,
-                           delimiter=',', progress_callback=None):
+    def load_csv_chunked_to_duckdb(self, csv_path, duckdb_storage, table_name,
+                                    delimiter=',', is_append=False, progress_callback=None):
+        """메모리 안전 CSV 로드 — pandas 청크 리더 사용 (대용량 5GB+ 파일 대응)"""
         _validate_table_name(table_name)
         csv_path = Path(csv_path)
         if not csv_path.exists():
             raise FileNotFoundError(f"CSV 파일 없음: {csv_path}")
-        # delimiter는 단일 문자만 허용 (SQL 인젝션 방지)
         if not isinstance(delimiter, str) or len(delimiter) != 1:
             raise ValueError(f"delimiter는 단일 문자여야 합니다: {delimiter!r}")
-        duckdb_storage.drop_table(table_name)
-        # 경로 검증: SQL 인젝션 벡터 차단 (세미콜론, 코멘트, 따옴표 이스케이프)
-        path_str = csv_path.as_posix()
-        if any(seq in path_str for seq in [';', '--', '/*']):
-            raise ValueError(f"CSV 경로에 허용되지 않는 문자 포함: {path_str[:100]}")
-        safe_path = path_str.replace("'", "''")
-        safe_delim = delimiter.replace("'", "''")
-        duckdb_storage.execute(f"""
-            CREATE TABLE {table_name} AS
-            SELECT * FROM read_csv_auto('{safe_path}', delim='{safe_delim}', header=true, sample_size=10000)
-        """)
-        count = duckdb_storage.get_row_count(table_name)
-        if progress_callback:
-            progress_callback(count, table_name)
+
+        if not is_append:
+            duckdb_storage.drop_table(table_name)
+
+        first_chunk = not is_append and not duckdb_storage.table_exists(table_name)
+        total = 0
+        current_chunk = chunk_controller.get_chunk('csv')
+
+        for chunk_df in pd.read_csv(str(csv_path), delimiter=delimiter,
+                                     chunksize=current_chunk, low_memory=False,
+                                     dtype=str):  # dtype=str prevents mixed type issues
+            chunk_df = mem_manager.optimize_dtypes(chunk_df)
+
+            if first_chunk:
+                duckdb_storage.conn.register('_temp_csv', chunk_df)
+                duckdb_storage.execute(f"CREATE TABLE {table_name} AS SELECT * FROM _temp_csv")
+                duckdb_storage.conn.unregister('_temp_csv')
+                first_chunk = False
+            else:
+                duckdb_storage.conn.register('_temp_csv', chunk_df)
+                duckdb_storage.execute(f"INSERT INTO {table_name} SELECT * FROM _temp_csv")
+                duckdb_storage.conn.unregister('_temp_csv')
+
+            total += len(chunk_df)
+            del chunk_df
+            gc.collect()
+            chunk_controller.auto_adjust()
+
+            if progress_callback:
+                progress_callback(total, table_name)
+
+        return total
+
+    def load_csv_to_duckdb(self, csv_path, duckdb_storage, table_name,
+                           delimiter=',', progress_callback=None):
+        """CSV → DuckDB (메모리 안전 청크 로드)"""
+        count = self.load_csv_chunked_to_duckdb(
+            csv_path, duckdb_storage, table_name,
+            delimiter=delimiter, is_append=False,
+            progress_callback=progress_callback
+        )
+        # Create indexes
+        if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
+            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO'])
+        elif table_name.upper() == 'JK':
+            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO', 'STD_YYYY'])
+        logger.info(f"CSV → DuckDB: {table_name} ({count:,}건)")
         return count
+
+    def _load_sas_append(self, sas_path, duckdb_storage, table_name,
+                         columns=None, is_append=False, progress_callback=None):
+        """SAS 파일 1개를 DuckDB에 로드 (append 모드 지원)"""
+        import pyreadstat
+        sas_path = Path(sas_path)
+        if not sas_path.exists():
+            raise FileNotFoundError(f"SAS 파일 없음: {sas_path}")
+
+        if not is_append:
+            duckdb_storage.drop_table(table_name)
+
+        first_chunk = not is_append and not duckdb_storage.table_exists(table_name)
+        total = 0
+        current_chunk = chunk_controller.get_chunk('sas')
+
+        reader = pyreadstat.read_file_in_chunks(
+            pyreadstat.read_sas7bdat, str(sas_path),
+            chunksize=current_chunk, usecols=columns,
+        )
+
+        for chunk_df, meta in reader:
+            chunk_df = mem_manager.optimize_dtypes(chunk_df)
+
+            if first_chunk:
+                duckdb_storage.conn.register('_temp_sas', chunk_df)
+                duckdb_storage.execute(f"CREATE TABLE {table_name} AS SELECT * FROM _temp_sas")
+                duckdb_storage.conn.unregister('_temp_sas')
+                first_chunk = False
+            else:
+                duckdb_storage.conn.register('_temp_sas', chunk_df)
+                duckdb_storage.execute(f"INSERT INTO {table_name} SELECT * FROM _temp_sas")
+                duckdb_storage.conn.unregister('_temp_sas')
+
+            total += len(chunk_df)
+            del chunk_df
+            gc.collect()
+            chunk_controller.auto_adjust()
+
+            if progress_callback:
+                progress_callback(total, table_name)
+
+        return total
+
+    def load_multi_files_to_duckdb(self, file_paths, file_type, duckdb_storage, table_name,
+                                    delimiter=',', columns=None, progress_callback=None):
+        """다중 분할 파일을 하나의 DuckDB 테이블로 병합 로드
+
+        Args:
+            file_paths: list of file paths (CSV or SAS)
+            file_type: 'csv' or 'sas'
+            duckdb_storage: DuckDBStorage instance
+            table_name: target DuckDB table name
+            delimiter: CSV delimiter (ignored for SAS)
+            columns: column filter (SAS only)
+            progress_callback: fn(total_rows, current_file_name)
+        Returns:
+            total row count
+        """
+        _validate_table_name(table_name)
+        if not file_paths:
+            raise ValueError("로드할 파일이 없습니다")
+
+        # Sort files by name for deterministic order
+        file_paths = sorted(file_paths)
+
+        grand_total = 0
+        duckdb_storage.drop_table(table_name)
+
+        for i, fpath in enumerate(file_paths):
+            fpath = Path(fpath)
+            fname = fpath.name
+            is_append = (i > 0)  # first file creates table, rest append
+
+            if progress_callback:
+                progress_callback(f"[{i+1}/{len(file_paths)}] {fname} 로드 중...")
+
+            logger.info(f"분할 파일 로드 [{i+1}/{len(file_paths)}]: {fname}")
+
+            if file_type == 'csv':
+                count = self.load_csv_chunked_to_duckdb(
+                    fpath, duckdb_storage, table_name,
+                    delimiter=delimiter, is_append=is_append,
+                    progress_callback=progress_callback
+                )
+            elif file_type == 'sas':
+                # For SAS, reuse existing chunked loader but with append mode
+                count = self._load_sas_append(
+                    fpath, duckdb_storage, table_name,
+                    columns=columns, is_append=is_append,
+                    progress_callback=progress_callback
+                )
+            else:
+                raise ValueError(f"지원하지 않는 파일 유형: {file_type}")
+
+            grand_total += count
+            logger.info(f"  → {fname}: {count:,}건 (누적: {grand_total:,}건)")
+
+            # Inter-file memory cleanup
+            mem_manager.force_cleanup()
+
+        # Create indexes after all files loaded
+        if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
+            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO'])
+            duckdb_storage.create_index(table_name, ['CMN_KEY'])
+        elif table_name.upper() == 'JK':
+            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO', 'STD_YYYY'])
+
+        logger.info(f"다중 파일 병합 완료: {table_name} ({grand_total:,}건, {len(file_paths)}개 파일)")
+        return grand_total
 
 
 class ExamDataMerger:
@@ -808,6 +969,17 @@ class DataManager:
     def load_from_csv(self, table_name, csv_path, delimiter=',', progress_callback=None):
         count = self.sas_loader.load_csv_to_duckdb(
             csv_path, self.storage, table_name, delimiter, progress_callback
+        )
+        self.loaded_tables[table_name] = count
+        return count
+
+    def load_from_files_multi(self, table_name, file_paths, file_type='csv',
+                               delimiter=',', columns=None, progress_callback=None):
+        """다중 분할 파일 병합 로드"""
+        count = self.sas_loader.load_multi_files_to_duckdb(
+            file_paths, file_type, self.storage, table_name,
+            delimiter=delimiter, columns=columns,
+            progress_callback=progress_callback
         )
         self.loaded_tables[table_name] = count
         return count
