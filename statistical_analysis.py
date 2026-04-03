@@ -13,8 +13,8 @@ from lifelines.statistics import proportional_hazard_test
 from scipy import stats
 from config import STUDY_SETTINGS, DEMENTIA_DRUG_CODES
 from memory_manager import mem_manager
-import duckdb
 from dataclasses import dataclass
+import duckdb
 
 logger = logging.getLogger(__name__)
 
@@ -53,11 +53,12 @@ class StatisticalAnalyzer:
         self.dm = data_manager
         self.results = {}
         self._cached_df = None  # 데이터 1회 로드 후 캐시
+        self._sampling_info = SamplingInfo(applied=False, total_rows=0, sampled_rows=0)
 
     def _load_data(self):
         """메모리 안전 데이터 로드 — 1회 로드 후 캐시 재사용"""
         if self._cached_df is not None:
-            return self._cached_df
+            return self._cached_df, self._sampling_info
 
         max_rows = mem_manager.get_safe_analysis_rows()
         total = self.dm.storage.get_row_count('final_analysis')
@@ -76,8 +77,10 @@ class StatisticalAnalyzer:
                 self._cached_df = self.dm.query(
                     "SELECT * FROM final_analysis WHERE follow_up_days > 0 LIMIT 0"
                 )
-                self.results['_sampling_note'] = "추적 가능한 행이 없어 샘플링을 건너뜁니다."
-                return self._cached_df
+                self._sampling_info = SamplingInfo(
+                    applied=True, total_rows=total, sampled_rows=0
+                )
+                return self._cached_df, self._sampling_info
 
             # DM 그룹은 전부 유지, NON_DM만 남은 예산으로 샘플링
             # → DM 분석 underpowered 방지 + 노출군 비율 왜곡 최소화
@@ -109,19 +112,24 @@ class StatisticalAnalyzer:
                 ) t
                 WHERE rn <= grp_limit
             """)
-            self.results['_sampling_note'] = (
-                f"메모리 제한으로 비례 층화 샘플링 적용: 전체 {total:,}건 → "
-                f"총 {len(self._cached_df):,}건 사용 "
-                f"(그룹별 원래 비율 유지)"
+            self._sampling_info = SamplingInfo(
+                applied=True,
+                total_rows=total,
+                sampled_rows=len(self._cached_df),
             )
         else:
             self._cached_df = self.dm.query("SELECT * FROM final_analysis WHERE follow_up_days > 0")
+            self._sampling_info = SamplingInfo(
+                applied=False,
+                total_rows=total,
+                sampled_rows=len(self._cached_df),
+            )
 
         # dtype 최적화
         self._cached_df = mem_manager.optimize_dtypes(self._cached_df)
         logger.info(f"분석 데이터 로드: {len(self._cached_df):,}건, "
                    f"{self._cached_df.memory_usage(deep=True).sum() / 1024**2:.1f}MB")
-        return self._cached_df
+        return self._cached_df, self._sampling_info
 
     def _release_cache(self):
         """캐시된 데이터 해제"""
@@ -174,6 +182,7 @@ class StatisticalAnalyzer:
             prepared['drk_moderate'] = np.where(drk_known, drk.isin(['Moderate', 'Heavy']).astype('float32'), np.nan).astype('float32')
             prepared['drk_missing'] = drk.isna().astype('int8')
 
+        prepared['follow_up_years'] = pd.to_numeric(prepared['follow_up_years'], errors='coerce')
         comor_cols = [c for c in prepared.columns if c.startswith('comor_') or c.startswith('comp_')]
         for col in comor_cols:
             prepared[col] = pd.to_numeric(prepared[col], errors='coerce').fillna(0).astype('int8')
@@ -185,7 +194,8 @@ class StatisticalAnalyzer:
         """3단계 Cox — df_prepared 전달 시 재사용"""
         if cb: cb(f"Cox 회귀 ({outcome})...")
         if df_prepared is None:
-            df_prepared = self._prepare(self._load_data())
+            raw, _ = self._load_data()
+            df_prepared = self._prepare(raw)
 
         T, E = 'follow_up_years', outcome
         results = {}
@@ -248,7 +258,8 @@ class StatisticalAnalyzer:
         from gpu_accelerator import get_logistic_regression, get_nearest_neighbors, is_gpu_enabled
 
         if df_prepared is None:
-            df_prepared = self._prepare(self._load_data())
+            raw, _ = self._load_data()
+            df_prepared = self._prepare(raw)
 
         # ★ 필요 컬럼만 추출 (전체 복사 방지)
         need_cols = ['exposure_group', 'is_t1dm', 'age_at_index', 'male', 'income_q',
@@ -382,7 +393,8 @@ class StatisticalAnalyzer:
     def run_interaction(self, cb=None, df_prepared=None):
         if cb: cb("상호작용 분석 중...")
         if df_prepared is None:
-            df_prepared = self._prepare(self._load_data())
+            raw, _ = self._load_data()
+            df_prepared = self._prepare(raw)
 
         df_dm = df_prepared[df_prepared['exposure_group'] != 'NON_DM']
         if 'dm_duration_cat' not in df_dm.columns:
@@ -420,7 +432,8 @@ class StatisticalAnalyzer:
     def run_subgroup(self, cb=None, df_prepared=None):
         if cb: cb("하위그룹 분석 중...")
         if df_prepared is None:
-            df_prepared = self._prepare(self._load_data())
+            raw, _ = self._load_data()
+            df_prepared = self._prepare(raw)
         df = df_prepared  # 참조만 (copy 안 함)
 
         subgroups = {
@@ -555,7 +568,8 @@ class StatisticalAnalyzer:
         if use_gpu_cif and cb:
             cb("경쟁위험 분석: GPU 가속 CIF 계산 활성화")
         if df_prepared is None:
-            df_prepared = self._prepare(self._load_data())
+            raw, _ = self._load_data()
+            df_prepared = self._prepare(raw)
 
         if 'competing_death_event' not in df_prepared.columns:
             logger.warning("competing_death_event 컬럼 없음 — 코호트 재구축 필요")
@@ -745,7 +759,8 @@ class StatisticalAnalyzer:
     def generate_table1(self, cb=None, df_prepared=None):
         if cb: cb("Table 1 생성 중...")
         if df_prepared is None:
-            df_prepared = self._prepare(self._load_data())
+            raw, _ = self._load_data()
+            df_prepared = self._prepare(raw)
 
         groups = sorted(df_prepared['exposure_group'].unique())
         rows = []
@@ -822,7 +837,7 @@ class StatisticalAnalyzer:
                      run_interaction=True, run_subgroup=True, run_sensitivity=True,
                      run_competing_risks=True):
         """선택된 분석만 실행 — 체크박스 상태를 그대로 반영"""
-        raw = self._load_data()
+        raw, info = self._load_data()
         df_prepared = self._prepare(raw)
         logger.info(f"분석 데이터 준비 완료: {len(df_prepared):,}건, "
                    f"{df_prepared.memory_usage(deep=True).sum() / 1024**2:.1f}MB")
@@ -866,9 +881,10 @@ class StatisticalAnalyzer:
             self.run_sensitivity(cb)
             mem_manager.cleanup_after_step('sensitivity')
 
+        self.results['sampling_info'] = info
         self._release_cache()
-        if '_sampling_note' in self.results and cb:
-            cb(f"[경고] {self.results['_sampling_note']}")
+        if info.applied and cb:
+            cb(f"[경고] {info.label}")
         if cb: cb("선택된 분석 완료!")
         return self.results
 
