@@ -9,6 +9,7 @@ import gc
 import re
 import time
 import logging
+import numbers
 from decimal import Decimal
 import duckdb
 import pandas as pd
@@ -32,7 +33,8 @@ def _validate_table_name(name):
 
 logger = logging.getLogger(__name__)
 
-DUCKDB_WIDE_INTEGER_DECIMAL = 'DECIMAL(18,0)'
+DUCKDB_WIDE_INTEGER_DECIMAL = 'DECIMAL(38,0)'
+DUCKDB_WIDE_DECIMAL_PRECISION = 38
 
 
 def _quote_identifier(name):
@@ -56,13 +58,30 @@ def _build_chunk_select_sql(chunk_df, temp_table_name):
     return f"SELECT {', '.join(select_parts)} FROM {temp_table_name}"
 
 
+def _decimal_value_to_text(value):
+    """Decimal 계열 값을 DuckDB CAST용 문자열로 정규화한다."""
+    if value is None or pd.isna(value):
+        return None
+    if isinstance(value, Decimal):
+        return format(value, 'f')
+    if isinstance(value, numbers.Integral):
+        return str(value)
+    if isinstance(value, numbers.Real):
+        return format(Decimal(str(value)), 'f')
+    return str(value)
+
+
 def _prepare_chunk_for_duckdb(chunk_df):
     """DuckDB 등록 전 청크 dtype을 안정화한다.
 
     Python Decimal object가 첫 청크에서 좁은 DECIMAL(p,s)로 추론되면
     이후 청크의 더 큰 값이 INSERT 시 범위 초과를 일으킬 수 있다.
-    적재 전 Decimal 컬럼을 숫자 타입으로 유지한 채 명시적으로
-    넉넉한 DECIMAL 타입으로 캐스팅해 청크 간 스키마를 고정한다.
+    적재 전 Decimal 컬럼을 문자열로 정규화한 뒤 명시적으로
+    넉넉한 DECIMAL 타입으로 CAST해 청크 간 스키마를 고정한다.
+
+    주의: HANA 컬럼은 Decimal + int 혼재(mixed-type)로 반환될 수 있다.
+    이전에는 all() 검사로 혼재 컬럼을 무시해 DECIMAL(4,0) 오추론이 발생했다.
+    any()로 변경하여 Decimal 값이 하나라도 있으면 넉넉한 타입을 강제한다.
     """
     type_overrides = {}
 
@@ -78,19 +97,75 @@ def _prepare_chunk_for_duckdb(chunk_df):
         if non_null.empty:
             continue
 
-        if not non_null.map(lambda value: isinstance(value, Decimal)).all():
+        decimal_mask = non_null.map(lambda value: isinstance(value, Decimal))
+        if not decimal_mask.any():
             continue
 
-        if non_null.map(lambda value: value == value.to_integral_value()).all():
+        # Decimal 값만으로 scale을 계산 (int/None 혼재 시 Decimal 부분만 사용)
+        decimal_values = non_null[decimal_mask]
+
+        chunk_df[col] = series.map(_decimal_value_to_text)
+
+        if decimal_values.map(lambda value: value == value.to_integral_value()).all():
             type_overrides[col] = DUCKDB_WIDE_INTEGER_DECIMAL
         else:
-            scale = non_null.map(
+            scale = decimal_values.map(
                 lambda value: max(0, -value.as_tuple().exponent)
             ).max()
-            type_overrides[col] = f'DECIMAL(38,{scale})'
+            type_overrides[col] = f'DECIMAL({DUCKDB_WIDE_DECIMAL_PRECISION},{scale})'
 
     chunk_df.attrs['duckdb_type_overrides'] = type_overrides
     return chunk_df
+
+
+def _widen_decimal_columns(storage, table_name):
+    """CREATE TABLE 직후 좁은 DECIMAL 컬럼을 안전한 너비로 확장한다.
+
+    첫 청크의 값이 작아 DuckDB가 DECIMAL(p,s)를 좁게 추론하더라도
+    이후 청크의 큰 값이 INSERT 실패하지 않도록 DECIMAL(38,s)로 확장한다.
+    _prepare_chunk_for_duckdb의 CAST override가 실패한 경우의 안전망이다.
+    """
+    _validate_table_name(table_name)
+    try:
+        schema_df = storage.execute_df(
+            "SELECT column_name, data_type, numeric_precision, numeric_scale "
+            "FROM information_schema.columns "
+            "WHERE table_name = ?",
+            [table_name],
+        )
+    except Exception:
+        # DuckDB 버전에 따라 파라미터 바인딩 미지원 가능 — 직접 쿼리로 fallback
+        schema_df = storage.execute_df(
+            f"SELECT column_name, data_type, numeric_precision, numeric_scale "
+            f"FROM information_schema.columns WHERE table_name = '{table_name}'"
+        )
+
+    for _, row in schema_df.iterrows():
+        if str(row['data_type']).upper() not in ('DECIMAL', 'NUMERIC'):
+            continue
+        try:
+            prec = int(row['numeric_precision']) if row['numeric_precision'] is not None else DUCKDB_WIDE_DECIMAL_PRECISION
+            scale = int(row['numeric_scale']) if row['numeric_scale'] is not None else 0
+        except (TypeError, ValueError):
+            continue
+        if prec >= DUCKDB_WIDE_DECIMAL_PRECISION:
+            continue  # 이미 충분히 넓음
+        safe_prec = DUCKDB_WIDE_DECIMAL_PRECISION
+        quoted_col = _quote_identifier(row['column_name'])
+        _validate_table_name(table_name)
+        try:
+            storage.execute(
+                f'ALTER TABLE "{table_name}" ALTER {quoted_col} '
+                f'TYPE DECIMAL({safe_prec},{scale})'
+            )
+            logger.debug(
+                f"DECIMAL 컬럼 확장: {table_name}.{row['column_name']} "
+                f"DECIMAL({prec},{scale}) → DECIMAL({safe_prec},{scale})"
+            )
+        except Exception as e:
+            logger.warning(
+                f"DECIMAL 컬럼 자동 확장 실패 ({table_name}.{row['column_name']}): {e}"
+            )
 
 
 class DuckDBStorage:
@@ -488,7 +563,7 @@ class HANAConnector:
             # DuckDB 적재 시 optimize_dtypes 사용 금지:
             # 청크별 min/max가 달라 첫 청크 기준 스키마와 이후 청크 값이 불일치
             # (예: 첫 청크 max=999999 → DECIMAL(6,0), 이후 값 1031900 → 범위 초과)
-            # Integral Decimal은 적재 전에 넉넉한 DECIMAL(18,0)으로 고정한다.
+            # Integral Decimal은 적재 전에 넉넉한 DECIMAL(38,0)으로 고정한다.
             chunk_df = _prepare_chunk_for_duckdb(chunk_df)
             chunk_sql = _build_chunk_select_sql(chunk_df, '_temp_chunk')
 
@@ -497,6 +572,8 @@ class HANAConnector:
                 duckdb_storage.conn.register('_temp_chunk', chunk_df)
                 duckdb_storage.execute(f"CREATE TABLE {duckdb_table} AS {chunk_sql}")
                 duckdb_storage.conn.unregister('_temp_chunk')
+                # 첫 청크 값이 작아 좁은 DECIMAL로 추론된 경우 DECIMAL(38,s)로 확장
+                _widen_decimal_columns(duckdb_storage, duckdb_table)
                 first_chunk = False
             else:
                 duckdb_storage.conn.register('_temp_chunk', chunk_df)
@@ -551,7 +628,7 @@ class SASFileLoader:
         )
 
         for chunk_df, meta in reader:
-            # Integral Decimal은 적재 전에 넉넉한 DECIMAL(18,0)으로 고정한다.
+            # Integral Decimal은 적재 전에 넉넉한 DECIMAL(38,0)으로 고정한다.
             chunk_df = _prepare_chunk_for_duckdb(chunk_df)
             chunk_sql = _build_chunk_select_sql(chunk_df, '_temp_sas')
 
@@ -559,6 +636,8 @@ class SASFileLoader:
                 duckdb_storage.conn.register('_temp_sas', chunk_df)
                 duckdb_storage.execute(f"CREATE TABLE {table_name} AS {chunk_sql}")
                 duckdb_storage.conn.unregister('_temp_sas')
+                # 첫 청크 값이 작아 좁은 DECIMAL로 추론된 경우 DECIMAL(38,s)로 확장
+                _widen_decimal_columns(duckdb_storage, table_name)
                 first_chunk = False
             else:
                 duckdb_storage.conn.register('_temp_sas', chunk_df)
@@ -610,6 +689,7 @@ class SASFileLoader:
                 duckdb_storage.conn.register('_temp_csv', chunk_df)
                 duckdb_storage.execute(f"CREATE TABLE {table_name} AS {chunk_sql}")
                 duckdb_storage.conn.unregister('_temp_csv')
+                _widen_decimal_columns(duckdb_storage, table_name)
                 first_chunk = False
             else:
                 duckdb_storage.conn.register('_temp_csv', chunk_df)
@@ -670,6 +750,8 @@ class SASFileLoader:
                 duckdb_storage.conn.register('_temp_sas', chunk_df)
                 duckdb_storage.execute(f"CREATE TABLE {table_name} AS {chunk_sql}")
                 duckdb_storage.conn.unregister('_temp_sas')
+                # 첫 청크 값이 작아 좁은 DECIMAL로 추론된 경우 DECIMAL(38,s)로 확장
+                _widen_decimal_columns(duckdb_storage, table_name)
                 first_chunk = False
             else:
                 duckdb_storage.conn.register('_temp_sas', chunk_df)
