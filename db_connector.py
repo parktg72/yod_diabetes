@@ -90,15 +90,32 @@ def _prepare_chunk_for_duckdb(chunk_df):
 
     for col in chunk_df.columns:
         series = chunk_df[col]
-        if series.dtype != 'object':
+        is_object_dtype = series.dtype == 'object'
+        is_string_extension_dtype = (
+            pd.api.types.is_string_dtype(series.dtype) and not is_object_dtype
+        )
+
+        if is_string_extension_dtype:
+            # pandas nullable string/string[pyarrow] 컬럼도 DuckDB 추론 전에 동일 처리
+            chunk_df[col] = series.astype('object')
+            series = chunk_df[col]
+            is_object_dtype = True
+
+        if not is_object_dtype:
             continue
 
         non_null = series[series.notna()]
         if non_null.empty:
+            # 첫 청크 전체 NULL이면 DuckDB가 INTEGER로 추론할 수 있음 → VARCHAR 강제
+            type_overrides[col] = 'VARCHAR'
             continue
 
         decimal_mask = non_null.map(lambda value: isinstance(value, Decimal))
         if not decimal_mask.any():
+            # Decimal 없는 object 컬럼: str 값이 하나라도 있으면 VARCHAR 강제
+            # (첫 청크에 숫자 문자열만 있어 INT32로 추론 후 이후 청크에 한글 삽입 시 오류 방지)
+            if non_null.map(lambda v: isinstance(v, str)).any():
+                type_overrides[col] = 'VARCHAR'
             continue
 
         # Decimal 값만으로 scale을 계산 (int/None 혼재 시 Decimal 부분만 사용)

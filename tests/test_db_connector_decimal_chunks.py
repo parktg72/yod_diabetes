@@ -117,3 +117,55 @@ def test_csv_loader_invokes_decimal_widening_on_first_chunk(tmp_path, monkeypatc
     assert calls == [(storage, 'claims')]
 
     storage.close()
+
+
+def test_string_extension_columns_are_forced_to_varchar(tmp_path):
+    storage = DuckDBStorage(str(tmp_path / 'string_columns.duckdb'))
+    storage.connect()
+
+    first_chunk = _prepare_chunk_for_duckdb(pd.DataFrame({
+        'SPEC_ADD_DESC': pd.Series([None, None], dtype='string'),
+        'DMD_TYPE': pd.Series(['101', '102'], dtype='string'),
+        'SPEC_TP_CD': pd.Series(['1', '2'], dtype='string'),
+        'EDC_ZN_CD': pd.Series(['11', '12'], dtype='string'),
+        'EDC_ZN_IP': pd.Series(['21', '22'], dtype='string'),
+    }))
+    storage.conn.register('_temp_chunk', first_chunk)
+    storage.execute(f"CREATE TABLE claims AS {_build_chunk_select_sql(first_chunk, '_temp_chunk')}")
+    storage.conn.unregister('_temp_chunk')
+
+    second_chunk = _prepare_chunk_for_duckdb(pd.DataFrame({
+        'SPEC_ADD_DESC': pd.Series(['심부장기감염'], dtype='string'),
+        'DMD_TYPE': pd.Series(['치주질환'], dtype='string'),
+        'SPEC_TP_CD': pd.Series(['외래'], dtype='string'),
+        'EDC_ZN_CD': pd.Series(['중환자실'], dtype='string'),
+        'EDC_ZN_IP': pd.Series(['입원'], dtype='string'),
+    }))
+    storage.conn.register('_temp_chunk', second_chunk)
+    storage.execute(f"INSERT INTO claims {_build_chunk_select_sql(second_chunk, '_temp_chunk')}")
+    storage.conn.unregister('_temp_chunk')
+
+    schema = dict(storage.execute("""
+        SELECT column_name, data_type
+        FROM information_schema.columns
+        WHERE table_name = 'claims'
+    """).fetchall())
+
+    assert schema == {
+        'SPEC_ADD_DESC': 'VARCHAR',
+        'DMD_TYPE': 'VARCHAR',
+        'SPEC_TP_CD': 'VARCHAR',
+        'EDC_ZN_CD': 'VARCHAR',
+        'EDC_ZN_IP': 'VARCHAR',
+    }
+    assert storage.execute("""
+        SELECT SPEC_ADD_DESC, DMD_TYPE, SPEC_TP_CD, EDC_ZN_CD, EDC_ZN_IP
+        FROM claims
+        ORDER BY SPEC_ADD_DESC NULLS FIRST
+    """).fetchall() == [
+        (None, '101', '1', '11', '21'),
+        (None, '102', '2', '12', '22'),
+        ('심부장기감염', '치주질환', '외래', '중환자실', '입원'),
+    ]
+
+    storage.close()
