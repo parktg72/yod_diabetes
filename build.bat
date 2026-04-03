@@ -3,10 +3,20 @@ setlocal enabledelayedexpansion
 chcp 65001 > nul
 echo === NHIS YOD-DM Analyzer v2.1 Build ===
 
-REM --- Python 설치 확인 ---
-python --version > /dev/null 2>&1
+REM --- Python 3.12 설치 확인 ---
+python --version > nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python이 설치되지 않았거나 PATH에 없습니다.
+    pause & exit /b 1
+)
+
+REM --- Python 버전 3.12 확인 ---
+for /f "tokens=2" %%v in ('python --version 2^>^&1') do set PY_VER=%%v
+echo [INFO] 감지된 Python 버전: %PY_VER%
+echo %PY_VER% | findstr /b "3.12" > nul
+if errorlevel 1 (
+    echo [ERROR] Python 3.12.x 가 필요합니다. 현재 버전: %PY_VER%
+    echo        https://www.python.org/downloads/ 에서 Python 3.12 를 설치하세요.
     pause & exit /b 1
 )
 
@@ -36,7 +46,7 @@ if errorlevel 1 (
 
 REM --- PyInstaller 설치 ---
 echo [INFO] PyInstaller 설치 중...
-python -m pip install --no-cache-dir pyinstaller
+python -m pip install --no-cache-dir "pyinstaller>=6.3,<7"
 if errorlevel 1 (
     echo [ERROR] PyInstaller 설치 실패
     pause & exit /b 1
@@ -82,6 +92,8 @@ pyinstaller --noconfirm --onedir --windowed^
  --hidden-import scipy.sparse^
  --hidden-import scipy.optimize^
  --hidden-import scipy._lib.messagestream^
+ --hidden-import scipy._lib.array_api_compat^
+ --hidden-import scipy._lib.array_api_compat.numpy^
  --hidden-import matplotlib^
  --hidden-import matplotlib.backends.backend_agg^
  --hidden-import matplotlib.backends.backend_pdf^
@@ -90,8 +102,14 @@ pyinstaller --noconfirm --onedir --windowed^
  --hidden-import matplotlib.font_manager^
  --hidden-import pandas^
  --hidden-import pandas.io.formats.excel^
+ --hidden-import pandas.io.excel._openpyxl^
  --hidden-import openpyxl^
  --hidden-import openpyxl.workbook^
+ --hidden-import openpyxl.styles^
+ --hidden-import openpyxl.styles.differential^
+ --hidden-import openpyxl.cell^
+ --hidden-import openpyxl.utils^
+ --hidden-import openpyxl.utils.dataframe^
  --hidden-import psutil^
  --hidden-import numpy^
  --collect-all lifelines^
@@ -102,6 +120,8 @@ pyinstaller --noconfirm --onedir --windowed^
  --collect-all pyreadstat^
  --collect-all matplotlib^
  --collect-all hdbcli^
+ --collect-all pandas^
+ --collect-all openpyxl^
  main_app.py
 
 if errorlevel 1 (
