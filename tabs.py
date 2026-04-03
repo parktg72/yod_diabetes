@@ -5,6 +5,7 @@ Each tab is a self-contained QWidget subclass sharing state via AppContext.
 
 import sys, os, logging, traceback
 import pandas as pd
+import duckdb
 from pathlib import Path
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QGridLayout, QGroupBox,
@@ -20,11 +21,11 @@ from config import APP_SETTINGS, STUDY_SETTINGS, MEMORY_SETTINGS, GPU_SETTINGS, 
 from db_connector import DataManager
 from cohort_builder import CohortBuilder
 from variable_generator import VariableGenerator
-from statistical_analysis import StatisticalAnalyzer
+from statistical_analysis import StatisticalAnalyzer, SamplingInfo
 from visualization import Visualizer
 from memory_manager import mem_manager, gpu_manager, chunk_controller
 from results_exporter import ResultsExporter
-from utils import format_number
+from utils import format_number, CohortStepError, format_error_for_user
 
 logger = logging.getLogger(__name__)
 
@@ -116,8 +117,13 @@ class ConnectionTab(QWidget):
             ok = self.ctx.dm.connect_hana(self.hana_host.text(), int(self.hana_port.text()),
                                            self.hana_user.text(), self.hana_pass.text())
             QMessageBox.information(self, "결과", "연결 성공!" if ok else "연결 실패")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("HANA 연결 테스트 실패")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
         except Exception as e:
-            QMessageBox.critical(self, "오류", str(e))
+            logger.exception("HANA 연결 테스트 중 예기치 않은 오류")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
 
     def init_workspace(self):
         self._init_dm()
@@ -274,8 +280,9 @@ class MemoryTab(QWidget):
                 self.lbl_gpu.setText(f"GPU: {gi['name']} | {gi['used_mb']:.0f}/{gi['total_mb']:.0f} MB")
             else:
                 self.lbl_gpu.setText("GPU: 미감지 (CPU 모드)")
-        except Exception as e:
-            logger.debug(f"메모리 모니터 갱신 실패: {e}")
+        except Exception:
+            # 실시간 모니터링 중 발생한 예외는 로그로만 남김
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -356,8 +363,13 @@ class HanaBrowserTab(QWidget):
                 item.setData(0, Qt.UserRole, {'type': 'schema', 'name': s})
                 self.hana_tree.addTopLevelItem(item)
             self.log_signal.emit(f"스키마 {len(schemas)}개 로드됨")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("HANA 스키마 로드 실패")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
         except Exception as e:
-            QMessageBox.critical(self, "오류", str(e))
+            logger.exception("HANA 스키마 로드 중 예기치 않은 오류")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
 
     def on_tree_click(self, item, col):
         data = item.data(0, Qt.UserRole)
@@ -382,8 +394,13 @@ class HanaBrowserTab(QWidget):
                     self.column_table.setItem(i, 3, QTableWidgetItem(c.get('nullable', '')))
                     self.column_table.setItem(i, 4, QTableWidgetItem(c.get('comment', '') or ''))
                 self.column_table.resizeColumnsToContents()
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("HANA 트리 클릭 오류")
+            self.log_signal.emit(f"오류: {format_error_for_user(e)}")
         except Exception as e:
-            self.log_signal.emit(f"오류: {e}")
+            logger.exception("HANA 트리 클릭 중 예기치 않은 오류")
+            self.log_signal.emit(f"오류: {format_error_for_user(e)}")
 
     def search_hana_tables(self):
         try:
@@ -410,8 +427,13 @@ class HanaBrowserTab(QWidget):
             self.hana_tree.addTopLevelItem(parent)
             parent.setExpanded(True)
             self.log_signal.emit(f"'{kw}' 검색: {len(results)}개")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("HANA 검색 실패")
+            self.log_signal.emit(f"검색 오류: {format_error_for_user(e)}")
         except Exception as e:
-            self.log_signal.emit(f"검색 오류: {e}")
+            logger.exception("HANA 검색 중 예기치 않은 오류")
+            self.log_signal.emit(f"검색 오류: {format_error_for_user(e)}")
 
     def map_selected_to_load(self):
         """선택한 HANA 테이블을 데이터 로드 탭에 매핑"""
@@ -620,7 +642,7 @@ class DataLoadTab(QWidget):
         self.log_signal.emit(f"로드 완료: {len(results)}개 테이블")
 
     def merge_exam_data(self):
-        """검진 데이터 연도별 → 통합 (WorkerThread로 GUI 블로킹 방지)"""
+        """검진 데이터 통합 (연도별 → 통합) (WorkerThread로 GUI 블로킹 방지)"""
         mw = self.ctx.main_window
         if mw._is_worker_running():
             return
@@ -768,11 +790,13 @@ class CohortTab(QWidget):
 # ---------------------------------------------------------------------------
 class AnalysisTab(QWidget):
     log_signal = pyqtSignal(str)
+    sampling_info_ready = pyqtSignal(object)  # SamplingInfo 전달
 
     def __init__(self, ctx: AppContext, connection_tab: ConnectionTab, parent=None):
         super().__init__(parent)
         self.ctx = ctx
         self.connection_tab = connection_tab
+        self._sampling_label = ""
         self._init_ui()
 
     def _init_ui(self):
@@ -803,6 +827,8 @@ class AnalysisTab(QWidget):
         self.analysis_text = QTextEdit(); self.analysis_text.setReadOnly(True)
         ly.addWidget(self.analysis_text)
 
+        self.sampling_info_ready.connect(self._on_sampling_info_ready)
+
     # --- helpers ---
     def _browse_dir(self, edit):
         d = QFileDialog.getExistingDirectory(self, "폴더 선택")
@@ -811,6 +837,43 @@ class AnalysisTab(QWidget):
 
     def _ensure_dm(self):
         self.connection_tab._init_dm()
+
+    def _on_sampling_info_ready(self, info: SamplingInfo):
+        """샘플링 적용 시 사용자에게 확인 요청."""
+        if not info or not info.applied:
+            self._sampling_label = ""
+            return
+
+        msg = QMessageBox(self)
+        msg.setIcon(QMessageBox.Warning)
+        msg.setWindowTitle("데이터 샘플링 적용")
+        msg.setText(
+            f"<b>⚠️ 층화 샘플링이 적용됩니다</b><br><br>"
+            f"전체 데이터: <b>{info.total_rows:,}건</b><br>"
+            f"분석 대상: <b>{info.sampled_rows:,}건</b> "
+            f"({info.ratio_pct:.1f}% 샘플링)<br><br>"
+            f"메모리 한계로 인해 비례 층화 샘플링이 적용됩니다.<br>"
+            f"결과 해석 시 이 점을 반드시 고려하세요."
+        )
+        msg.setStandardButtons(QMessageBox.Ok | QMessageBox.Cancel)
+        msg.button(QMessageBox.Ok).setText("계속 진행")
+        msg.button(QMessageBox.Cancel).setText("취소")
+
+        if msg.exec_() == QMessageBox.Cancel:
+            self._cancel_analysis()
+            return
+
+        self._sampling_label = info.label
+
+    def _cancel_analysis(self):
+        mw = self.ctx.main_window
+        if mw.worker and mw.worker.isRunning():
+            mw.worker.cancel()
+            mw.worker.quit()
+            mw.worker.wait()
+        mw.progress_bar.setVisible(False)
+        mw._set_action_buttons_enabled(True)
+        self.log_signal.emit("사용자에 의해 분석이 취소되었습니다.")
 
     # --- actions ---
     def start_analysis(self):
@@ -831,9 +894,14 @@ class AnalysisTab(QWidget):
         run_sens = self.chk_sens.isChecked()
 
         dm = self.ctx.dm
+        self._sampling_label = ""
 
         def do_analysis(progress_callback=None):
             analyzer = StatisticalAnalyzer(dm)
+            # 데이터 로드 후 샘플링 정보 시그널 발생
+            _, info = analyzer._load_data()
+            self.sampling_info_ready.emit(info)
+
             return analyzer.run_selected(
                 progress_callback,
                 run_cox=run_cox, run_psm=run_psm,
@@ -859,10 +927,8 @@ class AnalysisTab(QWidget):
         ar = data.get('result', {})
         self.ctx.all_results['analysis'] = ar
 
-        # 샘플링 경고 팝업 표시
-        sampling_note = ar.get('_sampling_note')
-        if sampling_note:
-            QMessageBox.warning(self, "샘플링 적용", sampling_note)
+        if self._sampling_label:
+            self.log_signal.emit(f"주의: {self._sampling_label} 적용됨")
 
         # 시각화 + 내보내기 (GUI 비의존 모듈로 분리)
         from analysis_runner import run_post_analysis
@@ -935,7 +1001,7 @@ class ResultsTab(QWidget):
 
     # --- actions ---
     def show_result(self, idx):
-        df, _ = self._get_result_df(idx)
+        df, base_title = self._get_result_df(idx)
         if df is not None:
             df2 = df.reset_index() if df.index.name else df
             self.result_table.setRowCount(len(df2))
@@ -964,8 +1030,13 @@ class ResultsTab(QWidget):
             df2 = df.reset_index() if hasattr(df, 'index') and df.index.name else df
             df2.to_excel(path, index=False, sheet_name=sheet[:31])
             self.log_signal.emit(f"내보내기 완료: {path}")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("Excel 내보내기 실패")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
         except Exception as e:
-            QMessageBox.critical(self, "오류", str(e))
+            logger.exception("Excel 내보내기 중 예기치 않은 오류")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
 
     def export_all(self):
         ar = self.ctx.all_results.get('analysis', {})
@@ -1000,17 +1071,30 @@ class ResultsTab(QWidget):
                     os.startfile(p)
                 else:
                     logger.warning(f"결과 디렉토리 외부 경로 차단: {p}")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("KM 곡선 생성 실패")
+            QMessageBox.warning(self, "오류", format_error_for_user(e))
         except Exception as e:
-            QMessageBox.warning(self, "오류", str(e))
+            logger.exception("KM 곡선 생성 중 예기치 않은 오류")
+            QMessageBox.warning(self, "오류", format_error_for_user(e))
 
     def plot_forest(self):
-        ar = self.ctx.all_results.get('analysis', {})
-        if 'subgroup' in ar:
-            viz = Visualizer(str(self.ctx.results_dir))
-            p = viz.plot_forest(ar['subgroup'])
-            if p and sys.platform == 'win32':
-                rp = Path(p).resolve()
-                if rp.is_relative_to(self.ctx.results_dir.resolve()):
-                    os.startfile(p)
-                else:
-                    logger.warning(f"결과 디렉토리 외부 경로 차단: {p}")
+        try:
+            ar = self.ctx.all_results.get('analysis', {})
+            if 'subgroup' in ar:
+                viz = Visualizer(str(self.ctx.results_dir))
+                p = viz.plot_forest(ar['subgroup'])
+                if p and sys.platform == 'win32':
+                    rp = Path(p).resolve()
+                    if rp.is_relative_to(self.ctx.results_dir.resolve()):
+                        os.startfile(p)
+                    else:
+                        logger.warning(f"결과 디렉토리 외부 경로 차단: {p}")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("Forest Plot 생성 실패")
+            QMessageBox.warning(self, "오류", format_error_for_user(e))
+        except Exception as e:
+            logger.exception("Forest Plot 생성 중 예기치 않은 오류")
+            QMessageBox.warning(self, "오류", format_error_for_user(e))
