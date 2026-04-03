@@ -73,14 +73,10 @@ class StatisticalAnalyzer:
             valid_total = sum(group_counts.values())
 
             if valid_total == 0:
-                logger.warning("추적 가능한 행(follow_up_days > 0)이 없어 분석을 건너뜁니다.")
-                self._cached_df = self.dm.query(
-                    "SELECT * FROM final_analysis WHERE follow_up_days > 0 LIMIT 0"
+                raise pd.errors.EmptyDataError(
+                    "추적 가능한 행(follow_up_days > 0)이 없습니다. "
+                    "코호트 구성 단계를 확인하세요."
                 )
-                self._sampling_info = SamplingInfo(
-                    applied=True, total_rows=total, sampled_rows=0
-                )
-                return self._cached_df, self._sampling_info
 
             # DM 그룹은 전부 유지, NON_DM만 남은 예산으로 샘플링
             # → DM 분석 underpowered 방지 + 노출군 비율 왜곡 최소화
