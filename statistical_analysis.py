@@ -14,8 +14,38 @@ from scipy import stats
 from config import STUDY_SETTINGS, DEMENTIA_DRUG_CODES
 from memory_manager import mem_manager
 import duckdb
+from dataclasses import dataclass
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class SamplingInfo:
+    """층화 샘플링 적용 여부 및 규모 정보.
+
+    applied: 샘플링이 적용되었으면 True
+    total_rows: 원본 전체 행 수
+    sampled_rows: 실제 분석에 사용된 행 수
+    """
+    applied: bool
+    total_rows: int
+    sampled_rows: int
+
+    @property
+    def ratio_pct(self) -> float:
+        if self.total_rows == 0:
+            return 0.0
+        return self.sampled_rows / self.total_rows * 100
+
+    @property
+    def label(self) -> str:
+        """UI 및 Excel 헤더용 한줄 요약. 샘플링 없으면 빈 문자열."""
+        if not self.applied:
+            return ""
+        return (
+            f"층화 샘플링: {self.sampled_rows:,}/{self.total_rows:,}건 "
+            f"({self.ratio_pct:.1f}%)"
+        )
 
 
 class StatisticalAnalyzer:
