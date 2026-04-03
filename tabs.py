@@ -854,12 +854,45 @@ class AnalysisTab(QWidget):
         msg.button(QMessageBox.Cancel).setText("취소")
         return msg.exec_() == QMessageBox.Ok
 
+    def _confirm_sampling_if_needed(self) -> bool:
+        """분석 시작 전 샘플링 필요 여부 확인. True = 진행, False = 취소.
+
+        final_analysis 행 수를 동기적으로 조회하여 샘플링이 필요하면 확인 다이얼로그를
+        보여준다. DB 없거나 테이블 없으면 True 반환 (분석 시 실패로 처리).
+        """
+        if self.ctx.dm is None:
+            return True
+        try:
+            total = self.ctx.dm.storage.get_row_count('final_analysis')
+        except Exception:
+            return True  # 테이블 없음 — 분석 실행 시 실패로 처리
+
+        from memory_manager import mem_manager as _mm
+        max_rows = _mm.get_safe_analysis_rows()
+        if total <= max_rows:
+            return True  # 샘플링 불필요, 바로 진행
+
+        from statistical_analysis import SamplingInfo
+        seed = int(STUDY_SETTINGS.get('SAMPLING_SEED', 42))
+        preview = SamplingInfo(
+            applied=True,
+            total_rows=total,
+            sampled_rows=max_rows,  # 실제 값은 분석 후 확정; 예상치로 표시
+            seed=seed,
+        )
+        return self._show_sampling_dialog(preview)
+
     # --- actions ---
     def start_analysis(self):
         mw = self.ctx.main_window
         if mw._is_worker_running():
             return
         self._ensure_dm()
+
+        # 샘플링 사전 확인 — 분석 시작 전, Cancel 시 워커 미시작
+        if not self._confirm_sampling_if_needed():
+            return
+
         self.ctx.results_dir = Path(self.res_dir_edit.text())
         self.ctx.results_dir.mkdir(parents=True, exist_ok=True)
         mw.progress_bar.setVisible(True)
@@ -901,10 +934,9 @@ class AnalysisTab(QWidget):
         ar = data.get('result', {})
         self.ctx.all_results['analysis'] = ar
 
-        # 샘플링 경고 팝업 표시 (메인 스레드에서 실행됨)
+        # 샘플링 레이블 갱신 (다이얼로그는 start_analysis 에서 이미 표시됨)
         sampling_info = ar.get('sampling_info')
         if sampling_info is not None and sampling_info.applied:
-            self._show_sampling_dialog(sampling_info)
             self._sampling_label = sampling_info.label
             self.ctx.sampling_label = sampling_info.label
         else:
