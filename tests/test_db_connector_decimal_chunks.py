@@ -10,9 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import db_connector
 
+from config import EXAM_STRUCTURE
 from db_connector import (
     DUCKDB_WIDE_INTEGER_DECIMAL,
     DuckDBStorage,
+    ExamDataMerger,
     _build_chunk_select_sql,
     _prepare_chunk_for_duckdb,
     _widen_decimal_columns,
@@ -166,6 +168,66 @@ def test_string_extension_columns_are_forced_to_varchar(tmp_path):
         (None, '101', '1', '11', '21'),
         (None, '102', '2', '12', '22'),
         ('심부장기감염', '치주질환', '외래', '중환자실', '입원'),
+    ]
+
+    storage.close()
+
+
+def test_merge_exam_questionnaires_uses_later_year_column_type_before_fallback(tmp_path):
+    storage = DuckDBStorage(str(tmp_path / 'quest_column_types.duckdb'))
+    storage.connect()
+
+    storage.execute("""
+        CREATE TABLE GJ_QUEST_2018 (
+            INDI_DSCM_NO BIGINT,
+            HC_BZ_YYYY VARCHAR
+        )
+    """)
+    storage.execute("INSERT INTO GJ_QUEST_2018 VALUES (1, '2018')")
+
+    storage.execute("""
+        CREATE TABLE GJ_QUEST_2019 (
+            INDI_DSCM_NO BIGINT,
+            HC_BZ_YYYY VARCHAR,
+            Q_PHX_DX_DM VARCHAR
+        )
+    """)
+    storage.execute("INSERT INTO GJ_QUEST_2019 VALUES (2, '2019', 'Y')")
+
+    merger = ExamDataMerger(storage)
+    merger.es = dict(EXAM_STRUCTURE)
+    merger.es['SPLIT_RANGE'] = (2018, 2019)
+    merger.es['QUEST_COMMON_COLS'] = ['INDI_DSCM_NO', 'HC_BZ_YYYY', 'Q_PHX_DX_DM']
+    merger.es['LEGACY_QUEST_MAP'] = {}
+
+    resolved_types = merger._get_column_type_map(
+        'GJ_QUEST',
+        2018,
+        2019,
+        merger.es['QUEST_COMMON_COLS'],
+        default_type='VARCHAR',
+    )
+
+    merged_count = merger.merge_exam_questionnaires()
+
+    col_type = storage.execute("""
+        SELECT data_type
+        FROM information_schema.columns
+        WHERE table_name = 'GJ_QUEST' AND column_name = 'Q_PHX_DX_DM'
+    """).fetchone()[0]
+    values = storage.execute("""
+        SELECT INDI_DSCM_NO, HC_BZ_YYYY, Q_PHX_DX_DM
+        FROM GJ_QUEST
+        ORDER BY INDI_DSCM_NO
+    """).fetchall()
+
+    assert merged_count == 2
+    assert EXAM_STRUCTURE['QUEST_COMMON_COL_TYPES']['Q_PHX_DX_DM'] == 'INTEGER'
+    assert resolved_types['Q_PHX_DX_DM'] == 'VARCHAR'
+    assert col_type == 'VARCHAR'
+    assert values == [
+        (1, '2018', None),
+        (2, '2019', 'Y'),
     ]
 
     storage.close()

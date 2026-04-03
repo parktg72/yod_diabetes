@@ -874,47 +874,38 @@ class ExamDataMerger:
         first = True
 
         # 2002-2017 통합 테이블 처리
+        split_start, split_end = self.es['SPLIT_RANGE']
+        col_types = self._get_column_type_map(
+            'GJ_RESULT', split_start, split_end, common_cols, default_type='DOUBLE'
+        )
+
         if self.storage.table_exists('GJ_LEGACY'):
             legacy_map = self.es['LEGACY_KEY_MAP']
+            legacy_existing = self._get_table_columns('GJ_LEGACY')
             select_parts = []
             for col in common_cols:
                 if col in legacy_map:
-                    select_parts.append(f'"{legacy_map[col]}" AS "{col}"')
-                else:
-                    # 컬럼이 없으면 NULL
-                    select_parts.append(f'CASE WHEN TRUE THEN "{col}" END AS "{col}"')
-            legacy_select = ', '.join(select_parts)
-
-            try:
-                self.storage.execute(f"""
-                    CREATE TABLE GJ_RESULT AS
-                    SELECT {legacy_select} FROM GJ_LEGACY
-                """)
-                first = False
-                cnt = self.storage.get_row_count('GJ_RESULT')
-                logger.info(f"GJ_LEGACY → GJ_RESULT: {cnt:,}건")
-            except Exception as e:
-                logger.warning(f"GJ_LEGACY 처리 오류 (컬럼 불일치 가능): {e}")
-                # 폴백: RESULT_COMMON_COLS 전체 기준으로 존재 컬럼은 사용, 나머지는 NULL
-                # (소수 컬럼만 생성하면 downstream의 G1E_TG·G1E_HDL 등 참조 시 오류 발생)
-                legacy_existing = self._get_table_columns('GJ_LEGACY')
-                fallback_parts = []
-                for col in common_cols:
-                    mapped = legacy_map.get(col, col)
+                    mapped = legacy_map[col]
                     if mapped in legacy_existing:
-                        fallback_parts.append(f'"{mapped}" AS "{col}"')
-                    elif col in legacy_existing:
-                        fallback_parts.append(f'"{col}"')
+                        select_parts.append(f'"{mapped}" AS "{col}"')
                     else:
-                        fallback_parts.append(f'NULL AS "{col}"')
-                self.storage.execute(f"""
-                    CREATE TABLE GJ_RESULT AS
-                    SELECT {', '.join(fallback_parts)} FROM GJ_LEGACY
-                """)
-                first = False
+                        null_type = col_types.get(col, 'DOUBLE')
+                        select_parts.append(f'CAST(NULL AS {null_type}) AS "{col}"')
+                elif col in legacy_existing:
+                    select_parts.append(f'"{col}"')
+                else:
+                    null_type = col_types.get(col, 'DOUBLE')
+                    select_parts.append(f'CAST(NULL AS {null_type}) AS "{col}"')
+
+            self.storage.execute(f"""
+                CREATE TABLE GJ_RESULT AS
+                SELECT {', '.join(select_parts)} FROM GJ_LEGACY
+            """)
+            first = False
+            cnt = self.storage.get_row_count('GJ_RESULT')
+            logger.info(f"GJ_LEGACY → GJ_RESULT: {cnt:,}건")
 
         # 2018+ 연도별 검진결과 테이블 처리
-        split_start, split_end = self.es['SPLIT_RANGE']
         for year in range(split_start, split_end + 1):
             tname = f'GJ_RESULT_{year}'
             if not self.storage.table_exists(tname):
@@ -927,13 +918,15 @@ class ExamDataMerger:
             if not select_cols:
                 continue
 
-            # 누락 컬럼은 NULL로 채움
+            # 누락 컬럼은 타입 명시 NULL로 채움
+            # (NULL 리터럴은 DuckDB에서 INTEGER로 추론되어 이후 DOUBLE INSERT 시 ConversionException 발생)
             select_parts = []
             for col in common_cols:
                 if col in existing_cols:
                     select_parts.append(f'"{col}"')
                 else:
-                    select_parts.append(f'NULL AS "{col}"')
+                    null_type = col_types.get(col, 'DOUBLE')
+                    select_parts.append(f'CAST(NULL AS {null_type}) AS "{col}"')
             select_str = ', '.join(select_parts)
 
             if first:
@@ -964,7 +957,12 @@ class ExamDataMerger:
         # 2002-2017 통합 테이블에서 문진 변수 추출
         # QUEST_COMMON_COLS 전체를 기준으로 생성하여 downstream 쿼리(Q_SMK_NOW_YN 등)의
         # 컬럼 누락 오류를 방지. LEGACY_QUEST_MAP에 매핑된 컬럼은 레거시명으로 대체,
-        # 매핑 없는 컬럼은 NULL로 채워 스키마를 완전히 일치시킴.
+        # 매핑 없는 컬럼은 타입 명시 NULL로 채워 스키마를 완전히 일치시킴.
+        split_start_q, split_end_q = self.es['SPLIT_RANGE']
+        quest_col_types = self._get_column_type_map(
+            'GJ_QUEST', split_start_q, split_end_q, common_cols, default_type='VARCHAR'
+        )
+
         if self.storage.table_exists('GJ_LEGACY'):
             legacy_quest_map = self.es['LEGACY_QUEST_MAP']
             existing_cols = self._get_table_columns('GJ_LEGACY')
@@ -978,16 +976,19 @@ class ExamDataMerger:
                     if 'EXMD_BZ_YYYY' in existing_cols:
                         select_parts.append('EXMD_BZ_YYYY AS HC_BZ_YYYY')
                     else:
-                        select_parts.append('NULL AS HC_BZ_YYYY')
+                        null_type = quest_col_types.get('HC_BZ_YYYY', 'VARCHAR')
+                        select_parts.append(f'CAST(NULL AS {null_type}) AS HC_BZ_YYYY')
                 elif col in legacy_quest_map:
                     legacy_col = legacy_quest_map[col]
                     if legacy_col in existing_cols:
                         select_parts.append(f'"{legacy_col}" AS "{col}"')
                     else:
-                        select_parts.append(f'NULL AS "{col}"')
+                        null_type = quest_col_types.get(col, 'VARCHAR')
+                        select_parts.append(f'CAST(NULL AS {null_type}) AS "{col}"')
                 else:
-                    # LEGACY_QUEST_MAP에 없는 컬럼(Q_SMK_NOW_YN, Q_DRK_FRQ 등) → NULL
-                    select_parts.append(f'NULL AS "{col}"')
+                    # LEGACY_QUEST_MAP에 없는 컬럼(Q_SMK_NOW_YN, Q_DRK_FRQ 등) → 타입 명시 NULL
+                    null_type = quest_col_types.get(col, 'VARCHAR')
+                    select_parts.append(f'CAST(NULL AS {null_type}) AS "{col}"')
 
             try:
                 self.storage.execute(f"""
@@ -999,8 +1000,7 @@ class ExamDataMerger:
                 logger.warning(f"GJ_LEGACY 문진 추출 오류: {e}")
 
         # 2018+ 연도별 문진 테이블
-        split_start, split_end = self.es['SPLIT_RANGE']
-        for year in range(split_start, split_end + 1):
+        for year in range(split_start_q, split_end_q + 1):
             tname = f'GJ_QUEST_{year}'
             if not self.storage.table_exists(tname):
                 continue
@@ -1011,7 +1011,8 @@ class ExamDataMerger:
                 if col in existing_cols:
                     select_parts.append(f'"{col}"')
                 else:
-                    select_parts.append(f'NULL AS "{col}"')
+                    null_type = quest_col_types.get(col, 'VARCHAR')
+                    select_parts.append(f'CAST(NULL AS {null_type}) AS "{col}"')
             select_str = ', '.join(select_parts)
 
             if first:
@@ -1045,6 +1046,60 @@ class ExamDataMerger:
         except Exception as e:
             logger.warning(f"컬럼 조회 실패 ({table_name}): {e}")
             return []
+
+    def _get_column_type_map(self, table_prefix, split_start, split_end, common_cols,
+                             default_type='DOUBLE'):
+        """2018+ 소스 테이블에서 공통 컬럼의 실제 DuckDB 타입을 조회한다.
+
+        NULL 리터럴을 CAST 없이 사용하면 DuckDB가 INTEGER로 추론하여
+        이후 청크 INSERT 시 ConversionException이 발생한다.
+        실제 분할 연도 테이블에 존재하는 컬럼은 관측된 DuckDB 타입을 우선 사용하고,
+        config.py의 명시 타입은 실테이블에 없는 컬럼의 fallback으로만 사용한다.
+        """
+        explicit_type_map = {}
+        if table_prefix == 'GJ_RESULT':
+            explicit_type_map = self.es.get('RESULT_COMMON_COL_TYPES', {})
+        elif table_prefix == 'GJ_QUEST':
+            explicit_type_map = self.es.get('QUEST_COMMON_COL_TYPES', {})
+
+        col_types = {}
+
+        for year in range(split_start, split_end + 1):
+            tname = f'{table_prefix}_{year}'
+            if not self.storage.table_exists(tname):
+                continue
+            try:
+                try:
+                    schema_df = self.storage.execute_df(
+                        "SELECT column_name, data_type FROM information_schema.columns "
+                        "WHERE table_name = ?",
+                        [tname],
+                    )
+                except Exception:
+                    # DuckDB 버전에 따라 파라미터 바인딩 미지원 가능 — 직접 쿼리로 fallback
+                    schema_df = self.storage.execute_df(
+                        f"SELECT column_name, data_type FROM information_schema.columns "
+                        f"WHERE table_name = '{tname}'"
+                    )
+                for _, row in schema_df.iterrows():
+                    if row['column_name'] in common_cols:
+                        col_types[row['column_name']] = row['data_type']
+            except Exception as e:
+                logger.warning(
+                    f"컬럼 타입 조회 실패 ({tname}): {e}; "
+                    "명시 타입 선언을 fallback으로 사용합니다."
+                )
+            if len(col_types) == len(common_cols):
+                break  # 모든 공통 컬럼 타입을 확보하면 중단
+
+        # 실테이블에 없는 컬럼만 명시 타입, 그다음 기본 타입으로 채움
+        for col in common_cols:
+            if col not in col_types and col in explicit_type_map:
+                col_types[col] = explicit_type_map[col]
+
+        for col in common_cols:
+            col_types.setdefault(col, default_type)
+        return col_types
 
 
 class DataManager:

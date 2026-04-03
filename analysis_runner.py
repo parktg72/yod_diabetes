@@ -28,6 +28,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
 
     errors = []
     viz = Visualizer(str(results_dir))
+    sampling_info = analysis_results.get('sampling_info')
 
     # KM 곡선
     try:
@@ -82,7 +83,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
     exported_files = []
     try:
         exporter = ResultsExporter(str(results_dir))
-        exported_files = exporter.export_all(analysis_results)
+        exported_files = exporter.export_all(analysis_results, sampling_info=sampling_info)
     except Exception as e:
         errors.append(f"결과 내보내기 오류: {e}")
         log(f"결과 내보내기 오류: {e}")

@@ -117,6 +117,29 @@ EXAM_STRUCTURE = {
         'G1E_CRTN', 'G1E_GFR', 'G1E_HGB',
         'G1E_SGOT', 'G1E_SGPT', 'G1E_GGT',
     ],
+    # 2018+ 검진결과 공통 변수 타입 선언 (DuckDB 타입)
+    'RESULT_COMMON_COL_TYPES': {
+        'INDI_DSCM_NO': 'VARCHAR',
+        'HC_BZ_YYYY': 'VARCHAR',
+        'HC_DT': 'VARCHAR',
+        'G1E_HGHT': 'DOUBLE',
+        'G1E_WGHT': 'DOUBLE',
+        'G1E_WSTC': 'DOUBLE',
+        'G1E_BMI': 'DOUBLE',
+        'G1E_BP_SYS': 'DOUBLE',
+        'G1E_BP_DIA': 'DOUBLE',
+        'G1E_FBS': 'DOUBLE',
+        'G1E_TOT_CHOL': 'DOUBLE',
+        'G1E_TG': 'DOUBLE',
+        'G1E_HDL': 'DOUBLE',
+        'G1E_LDL_CALC': 'DOUBLE',
+        'G1E_CRTN': 'DOUBLE',
+        'G1E_GFR': 'DOUBLE',
+        'G1E_HGB': 'DOUBLE',
+        'G1E_SGOT': 'DOUBLE',
+        'G1E_SGPT': 'DOUBLE',
+        'G1E_GGT': 'DOUBLE',
+    },
     # 2018+ 문진 공통 변수
     'QUEST_COMMON_COLS': [
         'INDI_DSCM_NO', 'HC_BZ_YYYY',
@@ -127,6 +150,23 @@ EXAM_STRUCTURE = {
         'Q_SMK_YN', 'Q_SMK_NOW_YN',
         'Q_DRK_PER', 'Q_DRK_FRQ',
     ],
+    # 2018+ 문진 공통 변수 타입 선언 (DuckDB 타입)
+    'QUEST_COMMON_COL_TYPES': {
+        'INDI_DSCM_NO': 'VARCHAR',
+        'HC_BZ_YYYY': 'VARCHAR',
+        'Q_PHX_DX_DM': 'INTEGER',
+        'Q_PHX_TX_DM': 'INTEGER',
+        'Q_PHX_DX_HTN': 'INTEGER',
+        'Q_PHX_TX_HTN': 'INTEGER',
+        'Q_PHX_DX_DLD': 'INTEGER',
+        'Q_PHX_TX_DLD': 'INTEGER',
+        'Q_PHX_DX_STK': 'INTEGER',
+        'Q_PHX_DX_HTDZ': 'INTEGER',
+        'Q_SMK_YN': 'INTEGER',
+        'Q_SMK_NOW_YN': 'INTEGER',
+        'Q_DRK_PER': 'INTEGER',
+        'Q_DRK_FRQ': 'INTEGER',
+    },
     # 2002-2017 통합 테이블에서 문진 변수 매핑
     'LEGACY_QUEST_MAP': {
         'Q_SMK_YN': 'G1E_HB_SMK',

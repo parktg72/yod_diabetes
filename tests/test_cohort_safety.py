@@ -167,3 +167,4 @@ def test_build_cohort_stops_on_step_failure(mock_sleep):
     assert step1_called['v'] is True
     assert step2_called['v'] is False
     assert exc_info.value.step == 1
+    mock_sleep.assert_called_once_with(1)
