@@ -4,6 +4,8 @@ cohort_builder.py - 코호트 구축 모듈
 """
 
 import logging
+import time
+import duckdb
 from config import (
     DM_CODES, DEMENTIA_CODES, DEMENTIA_DRUG_CODES,
     OHA_CODES, INSULIN_EFMDC, INSULIN_CODES, STUDY_SETTINGS
@@ -18,6 +20,35 @@ class CohortBuilder:
     def __init__(self, data_manager):
         self.dm = data_manager
         self.settings = STUDY_SETTINGS
+
+    def _run_step(self, step_num: int, step_name: str, sql: str, result_table: str) -> int:
+        """단계 SQL 실행 + 1회 재시도 + 행 수 검증.
+
+        성공 시 result_table의 행 수 반환.
+        실패(duckdb.Error) 또는 결과 0건 시 CohortStepError 발생.
+        """
+        from utils import CohortStepError
+        for attempt in range(2):
+            try:
+                self.dm.execute(sql)
+                break
+            except duckdb.Error as e:
+                if attempt == 0:
+                    logger.warning(
+                        f"[{step_num}/7] {step_name} 1차 실패, 1초 후 재시도: {e}"
+                    )
+                    time.sleep(1)
+                else:
+                    raise CohortStepError(step_num, step_name, e)
+
+        n = self.dm.storage.get_row_count(result_table)
+        if n == 0:
+            raise CohortStepError(
+                step_num, step_name,
+                ValueError(f"{result_table} 결과 0건 — 데이터 적재 상태를 확인하세요.")
+            )
+        logger.info(f"[{step_num}/7] {step_name}: {n:,}건")
+        return n
 
     def _flat_oha_codes(self):
         codes = []
