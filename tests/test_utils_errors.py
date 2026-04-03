@@ -34,6 +34,7 @@ def test_format_duckdb_error():
 def test_format_empty_data_error():
     msg = format_error_for_user(pd.errors.EmptyDataError())
     assert "데이터가 없습니다" in msg
+    assert "코호트" in msg
 
 
 def test_format_value_error():
