@@ -1014,8 +1014,12 @@ class ResultsTab(QWidget):
         if not path:
             return
         try:
+            ar = self.ctx.all_results.get('analysis', {})
+            sampling_info = ar.get('sampling_info') if ar else None
             df2 = df.reset_index() if hasattr(df, 'index') and df.index.name else df
-            df2.to_excel(path, index=False, sheet_name=sheet[:31])
+            exp = ResultsExporter(str(self.ctx.results_dir))
+            with pd.ExcelWriter(path, engine='openpyxl') as writer:
+                exp._write_df_with_sampling_header(writer, df2, sheet[:31], sampling_info)
             self.log_signal.emit(f"내보내기 완료: {path}")
         except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
                 MemoryError, CohortStepError) as e:
@@ -1030,9 +1034,18 @@ class ResultsTab(QWidget):
         if not ar:
             QMessageBox.warning(self, "안내", "분석 결과 없음")
             return
+        sampling_info = ar.get('sampling_info')
         exp = ResultsExporter(str(self.ctx.results_dir))
-        files = exp.export_all(ar)
-        QMessageBox.information(self, "완료", f"{len(files)}개 파일 저장")
+        try:
+            files = exp.export_all(ar, sampling_info=sampling_info)
+            QMessageBox.information(self, "완료", f"{len(files)}개 파일 저장")
+        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
+                MemoryError, CohortStepError) as e:
+            logger.exception("전체 내보내기 실패")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
+        except Exception as e:
+            logger.exception("전체 내보내기 중 예기치 않은 오류")
+            QMessageBox.critical(self, "오류", format_error_for_user(e))
 
     def plot_km(self):
         try:
