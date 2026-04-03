@@ -6,8 +6,25 @@ from pathlib import Path
 from functools import wraps
 from config import APP_SETTINGS
 
-def setup_logging(log_dir='.'):
-    log_path = Path(log_dir) / APP_SETTINGS['LOG_FILE']
+def setup_logging(log_dir=None):
+    """로그 설정.
+
+    log_dir 생략 시:
+      - Windows: %LOCALAPPDATA%\\NHIS_YOD_DM_Analyzer\\logs
+      - 기타:    현재 디렉토리('.')
+    """
+    if log_dir is None:
+        if sys.platform == 'win32':
+            base = Path(os.environ.get('LOCALAPPDATA', Path.home() / 'AppData' / 'Local'))
+            log_dir_path = base / 'NHIS_YOD_DM_Analyzer' / 'logs'
+        else:
+            log_dir_path = Path('.')
+    else:
+        log_dir_path = Path(log_dir)
+
+    log_dir_path.mkdir(parents=True, exist_ok=True)
+    log_path = log_dir_path / APP_SETTINGS['LOG_FILE']
+
     root = logging.getLogger()
     # 이미 핸들러가 설정된 경우 중복 추가 방지
     if not root.handlers:
