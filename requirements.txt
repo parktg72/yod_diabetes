@@ -11,6 +11,6 @@ hdbcli>=2.17.0
 scipy>=1.10.0
 psutil>=5.9.0
 
-# GPU 가속 (선택사항 - NVIDIA GPU + CUDA 필요)
+# GPU acceleration (optional - requires NVIDIA GPU + CUDA)
 # cupy-cuda12x>=13.0.0
 # torch>=2.0.0
