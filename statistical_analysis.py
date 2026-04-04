@@ -93,8 +93,9 @@ class StatisticalAnalyzer:
                     alloc[g] = cnt  # DM 그룹 전수 포함
 
             # 할당 0인 그룹은 CASE 조건에서 제외 — ELSE 0 으로 rn <= 0 → 0건 반환
+            # exposure_group 값의 단따옴표를 이스케이프하여 SQL 안전성 보장
             per_group_sql_cases = " ".join(
-                f"WHEN exposure_group = '{g}' THEN {n}"
+                f"WHEN exposure_group = '{g.replace(chr(39), chr(39)*2)}' THEN {n}"
                 for g, n in alloc.items()
                 if n > 0
             )
@@ -102,6 +103,8 @@ class StatisticalAnalyzer:
             seed = int(STUDY_SETTINGS.get('SAMPLING_SEED', 42))
             seed_float = seed / 100.0  # DuckDB setseed: float in [0, 1]
             self.dm.execute(f"SELECT setseed({seed_float})")
+            logger.info("샘플링 전략: dm_total=%d, non_dm_budget=%d, max_rows=%d, seed=%d",
+                        dm_total, non_dm_budget, max_rows, seed)
 
             self._cached_df = self.dm.query(f"""
                 SELECT * EXCLUDE rn
