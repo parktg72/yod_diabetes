@@ -13,6 +13,7 @@ from lifelines.statistics import proportional_hazard_test
 from scipy import stats
 from config import STUDY_SETTINGS, DEMENTIA_DRUG_CODES
 from memory_manager import mem_manager
+from utils import InsufficientDataError
 from dataclasses import dataclass
 import duckdb
 
@@ -83,6 +84,11 @@ class StatisticalAnalyzer:
             if valid_total == 0:
                 logger.error("샘플링 분기: total=%d, valid_total=0 — EmptyDataError", total)
                 raise pd.errors.EmptyDataError(self._MSG_NO_VALID_ROWS)
+            min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
+            if valid_total < min_valid:
+                logger.error("샘플링 분기: valid_total=%d < min_valid=%d — InsufficientDataError",
+                             valid_total, min_valid)
+                raise InsufficientDataError(valid_rows=valid_total, min_rows=min_valid)
 
             # DM 그룹은 전부 유지, NON_DM만 남은 예산으로 샘플링
             # → DM 분석 underpowered 방지 + 노출군 비율 왜곡 최소화
@@ -134,6 +140,12 @@ class StatisticalAnalyzer:
             if self._cached_df.empty:
                 logger.error("비샘플링 분기: total=%d, valid_rows=0 — EmptyDataError", total)
                 raise pd.errors.EmptyDataError(self._MSG_NO_VALID_ROWS)
+            min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
+            valid_rows = len(self._cached_df)
+            if valid_rows < min_valid:
+                logger.error("비샘플링 분기: valid_rows=%d < min_valid=%d — InsufficientDataError",
+                             valid_rows, min_valid)
+                raise InsufficientDataError(valid_rows=valid_rows, min_rows=min_valid)
             self._sampling_info = SamplingInfo(
                 applied=False,
                 total_rows=total,
