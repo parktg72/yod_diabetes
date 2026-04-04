@@ -74,3 +74,20 @@ def test_run_cox_raises_on_insufficient_events():
         mock_mm.optimize_dtypes.side_effect = lambda df: df
         with pytest.raises(InsufficientDataError):
             analyzer.run_cox()
+
+
+def test_load_data_raises_on_invalid_min_valid_rows():
+    """MIN_VALID_ROWS 가 0 이하이면 ValueError 가 발생해야 한다."""
+    conn = duckdb.connect(':memory:')
+    conn.execute("""
+        CREATE TABLE final_analysis AS
+        SELECT 'T2DM_OHA' AS exposure_group, 1 AS follow_up_days, 1.0 AS follow_up_years, 0 AS dementia_event
+        FROM range(50)
+    """)
+    analyzer = _make_analyzer_with_conn(conn)
+    with patch('statistical_analysis.mem_manager') as mock_mm:
+        mock_mm.get_safe_analysis_rows.return_value = 200
+        mock_mm.optimize_dtypes.side_effect = lambda df: df
+        with patch('statistical_analysis.STUDY_SETTINGS', {'MIN_VALID_ROWS': 0, 'SAMPLING_SEED': 42}):
+            with pytest.raises(ValueError, match="MIN_VALID_ROWS"):
+                analyzer._load_data()

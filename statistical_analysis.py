@@ -70,6 +70,8 @@ class StatisticalAnalyzer:
             return self._cached_df, self._sampling_info
 
         min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
+        if min_valid <= 0:
+            raise ValueError(f"MIN_VALID_ROWS 는 양의 정수여야 합니다: {min_valid}")
         max_rows = mem_manager.get_safe_analysis_rows()
         total = self.dm.storage.get_row_count('final_analysis')
         if total > max_rows:
