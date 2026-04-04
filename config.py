@@ -201,6 +201,7 @@ STUDY_SETTINGS = {
     'INCOME_DECILES': 10,
     'CENSORING_EVENTS': ['yod', 'age65', 'death', 'withdrawal', 'study_end'],
     'SAMPLING_SEED': 42,          # 층화 샘플링 재현성 시드 (0–99 정수)
+    'MIN_VALID_ROWS': 30,         # Cox 분석 최소 유효 행 수 (EPV ≥ 10 기준)
 }
 
 DUCKDB_SETTINGS = {

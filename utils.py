@@ -103,6 +103,21 @@ class CohortStepError(Exception):
         )
 
 
+class InsufficientDataError(ValueError):
+    """분석에 필요한 최소 유효 행 수를 충족하지 못할 때 발생.
+
+    Cox 회귀에서 EPV(Events Per Variable) ≥ 10 을 만족하려면
+    최소 수십 건의 유효 행이 필요하다.
+    """
+    def __init__(self, valid_rows: int, min_rows: int):
+        super().__init__(
+            f"유효 행 수({valid_rows:,}건)가 최소 분석 기준({min_rows:,}건)에 미달합니다. "
+            "코호트 크기를 확인하거나 MIN_VALID_ROWS 설정을 낮추세요."
+        )
+        self.valid_rows = valid_rows
+        self.min_rows = min_rows
+
+
 def format_error_for_user(exc: Exception) -> str:
     """예외를 사용자 친화적 메시지로 변환한다.
 
