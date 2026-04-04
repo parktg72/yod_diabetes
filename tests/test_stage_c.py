@@ -76,7 +76,34 @@ def test_nonzero_budget_stratum_included():
         df, info = analyzer._load_data()
 
     non_dm_rows = df[df['exposure_group'] == 'NON_DM']
-    assert len(non_dm_rows) > 0, "예산 있는 NON_DM 그룹이 샘플에 포함되어야 함"
+    # non_dm_budget = max_rows(400) - dm_total(300) = 100
+    assert len(non_dm_rows) == 100, \
+        f"NON_DM 샘플 건수가 예산(100)과 다름: {len(non_dm_rows)}건"
+    dm_rows = df[df['exposure_group'] == 'T2DM_OHA']
+    assert len(dm_rows) == 300, \
+        f"DM 그룹 전수 포함되어야 하나 {len(dm_rows)}건"
+
+
+def test_no_valid_rows_raises_empty_data_error():
+    """follow_up_days > 0 인 행이 없으면 EmptyDataError 가 발생해야 한다."""
+    conn = duckdb.connect(':memory:')
+    # 모든 행의 follow_up_days = 0 → WHERE follow_up_days > 0 필터에 전부 제외
+    conn.execute("""
+        CREATE TABLE final_analysis AS
+        SELECT 'T2DM_OHA' AS exposure_group, 0 AS follow_up_days, 0.0 AS follow_up_years, 0 AS dementia_event
+        FROM range(100)
+        UNION ALL
+        SELECT 'NON_DM', 0, 0.0, 0 FROM range(100)
+    """)
+
+    analyzer = _make_analyzer_with_conn(conn)
+
+    with patch('statistical_analysis.mem_manager') as mock_mm:
+        # total(200) > max_rows(50) → 샘플링 분기 진입 → valid_total=0 → EmptyDataError
+        mock_mm.get_safe_analysis_rows.return_value = 50
+        mock_mm.optimize_dtypes.side_effect = lambda df: df
+        with pytest.raises(pd.errors.EmptyDataError):
+            analyzer._load_data()
 
 
 def test_worker_thread_logs_exception_to_file_logger():
@@ -92,6 +119,6 @@ def test_worker_thread_logs_exception_to_file_logger():
     with patch('main_app.logger') as mock_logger:
         thread.run()
 
-    mock_logger.exception.assert_called_once()
+    mock_logger.exception.assert_called_once_with("WorkerThread 분석 중 예외 발생")
     # error signal 도 여전히 emit 되어야 함
     thread.error.emit.assert_called_once()
