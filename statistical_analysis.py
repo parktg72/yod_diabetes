@@ -92,9 +92,11 @@ class StatisticalAnalyzer:
                 else:
                     alloc[g] = cnt  # DM 그룹 전수 포함
 
+            # 할당 0인 그룹은 CASE 조건에서 제외 — ELSE 0 으로 rn <= 0 → 0건 반환
             per_group_sql_cases = " ".join(
-                f"WHEN exposure_group = '{g}' THEN {max(1, n)}"
+                f"WHEN exposure_group = '{g}' THEN {n}"
                 for g, n in alloc.items()
+                if n > 0
             )
 
             seed = int(STUDY_SETTINGS.get('SAMPLING_SEED', 42))
@@ -108,7 +110,7 @@ class StatisticalAnalyzer:
                            ROW_NUMBER() OVER (
                                PARTITION BY exposure_group ORDER BY RANDOM()
                            ) AS rn,
-                           CASE {per_group_sql_cases} ELSE 1 END AS grp_limit
+                           CASE {per_group_sql_cases} ELSE 0 END AS grp_limit
                     FROM final_analysis
                     WHERE follow_up_days > 0
                 ) t
