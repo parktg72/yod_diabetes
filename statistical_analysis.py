@@ -127,6 +127,11 @@ class StatisticalAnalyzer:
             )
         else:
             self._cached_df = self.dm.query("SELECT * FROM final_analysis WHERE follow_up_days > 0")
+            if len(self._cached_df) == 0:
+                raise pd.errors.EmptyDataError(
+                    "추적 가능한 행(follow_up_days > 0)이 없습니다. "
+                    "코호트 구성 단계를 확인하세요."
+                )
             self._sampling_info = SamplingInfo(
                 applied=False,
                 total_rows=total,

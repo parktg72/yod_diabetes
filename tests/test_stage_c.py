@@ -136,3 +136,28 @@ def test_worker_thread_logs_exception_to_file_logger():
     emit_arg = thread.error.emit.call_args[0][0]
     assert "test error for audit" in emit_arg, \
         f"error.emit 인자에 예외 메시지 누락: {emit_arg!r}"
+
+
+def test_nonsampling_path_no_valid_rows_raises_empty_data_error():
+    """비샘플링 경로(total <= max_rows)에서 유효 행이 없으면 EmptyDataError 가 발생해야 한다.
+
+    비샘플링 경로에서 빈 DataFrame 을 반환하면 하위 run_cox() 에서
+    lifelines cph.fit() 이 LinAlgError/ValueError 를 발생시켜 디버깅이 어렵다.
+    EmptyDataError 로 조기 실패해야 명확한 오류 메시지를 제공할 수 있다.
+    """
+    conn = duckdb.connect(':memory:')
+    # total(50) <= max_rows(200) → 비샘플링 경로
+    # follow_up_days=0 → WHERE follow_up_days > 0 필터 후 유효 행 0건
+    conn.execute("""
+        CREATE TABLE final_analysis AS
+        SELECT 'T2DM_OHA' AS exposure_group, 0 AS follow_up_days, 0.0 AS follow_up_years, 0 AS dementia_event
+        FROM range(50)
+    """)
+
+    analyzer = _make_analyzer_with_conn(conn)
+
+    with patch('statistical_analysis.mem_manager') as mock_mm:
+        mock_mm.get_safe_analysis_rows.return_value = 200  # total(50) <= 200 → 비샘플링
+        mock_mm.optimize_dtypes.side_effect = lambda df: df
+        with pytest.raises(pd.errors.EmptyDataError):
+            analyzer._load_data()
