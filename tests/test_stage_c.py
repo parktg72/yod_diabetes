@@ -159,5 +159,5 @@ def test_nonsampling_path_no_valid_rows_raises_empty_data_error():
     with patch('statistical_analysis.mem_manager') as mock_mm:
         mock_mm.get_safe_analysis_rows.return_value = 200  # total(50) <= 200 → 비샘플링
         mock_mm.optimize_dtypes.side_effect = lambda df: df
-        with pytest.raises(pd.errors.EmptyDataError):
+        with pytest.raises(pd.errors.EmptyDataError, match="follow_up_days > 0"):
             analyzer._load_data()

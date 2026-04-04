@@ -57,6 +57,12 @@ class StatisticalAnalyzer:
         self._cached_df = None  # 데이터 1회 로드 후 캐시
         self._sampling_info = SamplingInfo(applied=False, total_rows=0, sampled_rows=0)
 
+    # 유효 행 없음 에러 메시지 — 샘플링/비샘플링 양 경로 공통
+    _MSG_NO_VALID_ROWS = (
+        "추적 가능한 행(follow_up_days > 0)이 없습니다. "
+        "코호트 구성 단계를 확인하세요."
+    )
+
     def _load_data(self):
         """메모리 안전 데이터 로드 — 1회 로드 후 캐시 재사용"""
         if self._cached_df is not None:
@@ -75,10 +81,8 @@ class StatisticalAnalyzer:
             valid_total = sum(group_counts.values())
 
             if valid_total == 0:
-                raise pd.errors.EmptyDataError(
-                    "추적 가능한 행(follow_up_days > 0)이 없습니다. "
-                    "코호트 구성 단계를 확인하세요."
-                )
+                logger.error("샘플링 분기: total=%d, valid_total=0 — EmptyDataError", total)
+                raise pd.errors.EmptyDataError(self._MSG_NO_VALID_ROWS)
 
             # DM 그룹은 전부 유지, NON_DM만 남은 예산으로 샘플링
             # → DM 분석 underpowered 방지 + 노출군 비율 왜곡 최소화
@@ -127,11 +131,9 @@ class StatisticalAnalyzer:
             )
         else:
             self._cached_df = self.dm.query("SELECT * FROM final_analysis WHERE follow_up_days > 0")
-            if len(self._cached_df) == 0:
-                raise pd.errors.EmptyDataError(
-                    "추적 가능한 행(follow_up_days > 0)이 없습니다. "
-                    "코호트 구성 단계를 확인하세요."
-                )
+            if self._cached_df.empty:
+                logger.error("비샘플링 분기: total=%d, valid_rows=0 — EmptyDataError", total)
+                raise pd.errors.EmptyDataError(self._MSG_NO_VALID_ROWS)
             self._sampling_info = SamplingInfo(
                 applied=False,
                 total_rows=total,
