@@ -69,6 +69,7 @@ class StatisticalAnalyzer:
         if self._cached_df is not None:
             return self._cached_df, self._sampling_info
 
+        min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
         max_rows = mem_manager.get_safe_analysis_rows()
         total = self.dm.storage.get_row_count('final_analysis')
         if total > max_rows:
@@ -82,12 +83,11 @@ class StatisticalAnalyzer:
             valid_total = sum(group_counts.values())
 
             if valid_total == 0:
-                logger.error("샘플링 분기: total=%d, valid_total=0 — EmptyDataError", total)
+                logger.warning("샘플링 분기: total=%d, valid_total=0 — EmptyDataError", total)
                 raise pd.errors.EmptyDataError(self._MSG_NO_VALID_ROWS)
-            min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
             if valid_total < min_valid:
-                logger.error("샘플링 분기: valid_total=%d < min_valid=%d — InsufficientDataError",
-                             valid_total, min_valid)
+                logger.warning("샘플링 분기: valid_total=%d < min_valid=%d — InsufficientDataError",
+                               valid_total, min_valid)
                 raise InsufficientDataError(valid_rows=valid_total, min_rows=min_valid)
 
             # DM 그룹은 전부 유지, NON_DM만 남은 예산으로 샘플링
@@ -138,13 +138,12 @@ class StatisticalAnalyzer:
         else:
             self._cached_df = self.dm.query("SELECT * FROM final_analysis WHERE follow_up_days > 0")
             if self._cached_df.empty:
-                logger.error("비샘플링 분기: total=%d, valid_rows=0 — EmptyDataError", total)
+                logger.warning("비샘플링 분기: total=%d, valid_rows=0 — EmptyDataError", total)
                 raise pd.errors.EmptyDataError(self._MSG_NO_VALID_ROWS)
-            min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
             valid_rows = len(self._cached_df)
             if valid_rows < min_valid:
-                logger.error("비샘플링 분기: valid_rows=%d < min_valid=%d — InsufficientDataError",
-                             valid_rows, min_valid)
+                logger.warning("비샘플링 분기: valid_rows=%d < min_valid=%d — InsufficientDataError",
+                               valid_rows, min_valid)
                 raise InsufficientDataError(valid_rows=valid_rows, min_rows=min_valid)
             self._sampling_info = SamplingInfo(
                 applied=False,
