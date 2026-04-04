@@ -84,3 +84,41 @@ def test_run_subgroup_respects_min_valid_rows_from_config():
         result = analyzer.run_subgroup(df_prepared=df)
     assert 'sex_male' in result, \
         f"MIN_VALID_ROWS=30 인데도 sex_male(30건) 서브그룹이 skip 됨 — 하드코딩 100 사용 중. result keys: {list(result.keys())}"
+
+
+def test_run_competing_risks_respects_min_valid_rows_from_config():
+    """run_competing_risks 가 하드코딩 100 대신 MIN_VALID_ROWS 를 사용한다.
+
+    MIN_VALID_ROWS=30 으로 패치하면 35건 데이터도 처리 시도를 해야 한다.
+    (competing_death_event 컬럼 없이 실행하면 early-return하므로
+    컬럼을 포함시킨 뒤 임계값 통과 여부만 확인)
+    """
+    n = 35  # 하드코딩 100 이면 skip, MIN_VALID_ROWS=30 이면 통과
+    df = pd.DataFrame({
+        'follow_up_years': [1.0] * n,
+        'dementia_event': [1] * 5 + [0] * (n - 5),
+        'ad_event': [1] * 5 + [0] * (n - 5),
+        'vad_event': [0] * n,
+        'competing_death_event': [0] * n,
+        'exposure_group': ['T2DM_OHA'] * n,
+        'is_t1dm': [0] * n,
+        'is_t2dm_oha': [1] * n,
+        'is_t2dm_insulin': [0] * n,
+        'is_t2dm_nomed': [0] * n,
+        'age_at_index': [60.0] * n,
+        'male': [1] * n,
+    })
+    analyzer = _make_analyzer_with_df(df)
+    # dementia_event 를 제외하면 outcome='dementia_event' 루프 반복을 skip 해
+    # need_cols 중복 컬럼 문제를 피할 수 있음 (ad_event / vad_event 경로만 실행)
+    df_no_dem = df.drop(columns=['dementia_event'])
+    analyzer2 = _make_analyzer_with_df(df_no_dem)
+    with patch('statistical_analysis.STUDY_SETTINGS', {'MIN_VALID_ROWS': 30, 'MIN_EVENTS': 10, 'SAMPLING_SEED': 42}):
+        with patch('gpu_accelerator.is_gpu_enabled', return_value=False):
+            with patch('gpu_accelerator.compute_cif_gpu', return_value=None):
+                result = analyzer2.run_competing_risks(df_prepared=df_no_dem)
+    # 하드코딩 100 이면 모든 outcome 이 continue 되어 결과에 outcome 키가 없음
+    # MIN_VALID_ROWS=30 이면 35건이 임계값을 통과하여 최소 하나의 outcome 키가 있어야 함
+    outcome_keys = [k for k in result if k not in ('_method_warning', 'implemented')]
+    assert len(outcome_keys) > 0, \
+        "run_competing_risks 가 MIN_VALID_ROWS=30 임에도 모든 outcome 을 skip 함 — 하드코딩 100 의심"

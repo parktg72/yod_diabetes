@@ -522,6 +522,7 @@ class StatisticalAnalyzer:
                            'follow_up_years', 'dementia_event']
 
         sg_results = {}
+        _min_sg = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
         for name, mask in subgroups.items():
             try:
                 # ★ copy 대신 필요 컬럼만 선택하여 새 df 생성
@@ -532,7 +533,6 @@ class StatisticalAnalyzer:
                 dm = df.loc[mask, cols].dropna()
                 dm = dm[dm['follow_up_years'] > 0]
 
-                _min_sg = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
                 if len(dm) < _min_sg or dm['dementia_event'].sum() < 5:
                     continue
 
@@ -631,6 +631,7 @@ class StatisticalAnalyzer:
 
         T = 'follow_up_years'
         results = {}
+        _min_cr = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
 
         for outcome in ['dementia_event', 'ad_event', 'vad_event']:
             if outcome not in df_prepared.columns:
@@ -643,7 +644,6 @@ class StatisticalAnalyzer:
             df_cr = df_prepared[need_cols].dropna().copy()
             df_cr = df_cr[df_cr[T] > 0]
 
-            _min_cr = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
             if len(df_cr) < _min_cr:
                 continue
 
@@ -734,7 +734,7 @@ class StatisticalAnalyzer:
                 df_fit = df_fg[fit_cols].dropna()
                 df_fit = df_fit[df_fit[T] > 0]
 
-                if len(df_fit) >= int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30)) and df_fit[outcome].sum() >= 5:
+                if len(df_fit) >= _min_cr and df_fit[outcome].sum() >= 5:
                     cph = CoxPHFitter()
                     cph.fit(df_fit, duration_col=T, event_col=outcome, weights_col='_weight')
                     fg_summary = cph.summary
