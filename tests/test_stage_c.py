@@ -97,6 +97,6 @@ def test_worker_thread_logs_exception_to_file_logger():
     with patch('main_app.logger') as mock_logger:
         thread.run()
 
-    mock_logger.exception.assert_called_once()
+    mock_logger.exception.assert_called_once_with("WorkerThread 분석 중 예외 발생")
     # error signal 도 여전히 emit 되어야 함
     thread.error.emit.assert_called_once()
