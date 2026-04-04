@@ -52,6 +52,7 @@ class WorkerThread(QThread):
             if not self.is_cancelled:
                 self.finished.emit({'result': result})
         except Exception as e:
+            logger.exception("WorkerThread 분석 중 예외 발생")
             if not self.is_cancelled:
                 self.error.emit(f"{e}\n{traceback.format_exc()}")
 
