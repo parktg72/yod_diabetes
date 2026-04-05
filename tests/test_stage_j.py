@@ -237,6 +237,10 @@ def test_cif_ad_event_other_dementia_classified_as_competing_risk():
     cif = ad_result.get('cif_by_group', {})
     assert 'T2DM_OHA' in cif, \
         f"T2DM_OHA 가 ad_event CIF 에서 누락됨: {list(cif.keys())}"
+    # n_competing 는 전체 코호트의 경쟁위험 건수 (other_dementia 3건)
+    n_competing = result.get('ad_event', {}).get('n_competing')
+    assert n_competing == 3, \
+        f"other_dementia 경쟁위험 분류 건수가 3 이어야 함: {n_competing}"
     # other_dementia 경쟁위험이 분류됐으면 cif_competing 에 양수 값이 있어야 함
     cif_competing = cif['T2DM_OHA'].get('cif_competing', [])
     assert any(v > 0 for v in cif_competing), \
