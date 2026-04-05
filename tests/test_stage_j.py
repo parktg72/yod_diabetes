@@ -246,3 +246,50 @@ def test_cif_ad_event_other_dementia_classified_as_competing_risk():
     assert any(v > 0 for v in cif_competing), \
         (f"ad_event CIF T2DM_OHA 의 cif_competing 이 모두 0 — "
          f"other_dementia 경쟁위험 미분류 의심: {cif_competing}")
+
+
+def test_cif_vad_event_other_dementia_classified_as_competing_risk():
+    """vad_event 경로에서 non-VaD 치매(dementia=1, vad=0)가 경쟁위험으로 분류된다.
+
+    T2DM_OHA: 25행
+      - 4건: vad_event=1 (관심사건, event_type=1)
+      - 3건: dementia_event=1 AND vad_event=0 (other_dementia 경쟁위험, event_type=2)
+      - 나머지: 검열 (event_type=0)
+    n_competing == 3, cif_competing > 0 이어야 한다.
+    """
+    n = 40
+    # 행 0-14: T1DM (15행, 이벤트 없음 — skip)
+    # 행 15-39: T2DM_OHA (25행)
+    #   행 15-18: vad_event=1 (4건)
+    #   행 19-21: dementia_event=1, vad_event=0 (other_dementia 3건)
+    #   행 22-39: 이벤트 없음
+    vad_events  = [0] * 15 + [1] * 4 + [0] * 21
+    dem_events  = [0] * 15 + [0] * 4 + [1] * 3 + [0] * 18  # non-VaD 치매 3건
+    df = pd.DataFrame({
+        'follow_up_years': [1.0] * n,
+        'vad_event':         vad_events,
+        'dementia_event':    dem_events,
+        'competing_death_event': [0] * n,
+        'is_t1dm': [1] * 15 + [0] * 25,
+        'is_t2dm_oha': [0] * 15 + [1] * 25,
+        'is_t2dm_insulin': [0] * n,
+        'is_t2dm_nomed': [0] * n,
+        'age_at_index': [60.0] * n,
+        'male': [1] * n,
+    })
+    analyzer = _make_analyzer_with_df(df)
+    with patch('statistical_analysis.STUDY_SETTINGS',
+               {'MIN_VALID_ROWS': 10, 'MIN_EVENTS': 3, 'MIN_SUBGROUP_EVENTS': 3, 'SAMPLING_SEED': 42}):
+        with patch('gpu_accelerator.is_gpu_enabled', return_value=False):
+            result = analyzer.run_competing_risks(df_prepared=df)
+    vad_result = result.get('vad_event', {})
+    cif = vad_result.get('cif_by_group', {})
+    assert 'T2DM_OHA' in cif, \
+        f"T2DM_OHA 가 vad_event CIF 에서 누락됨: {list(cif.keys())}"
+    n_competing = vad_result.get('n_competing')
+    assert n_competing == 3, \
+        f"vad_event other_dementia 경쟁위험 분류 건수가 3 이어야 함: {n_competing}"
+    cif_competing = cif['T2DM_OHA'].get('cif_competing', [])
+    assert any(v > 0 for v in cif_competing), \
+        (f"vad_event CIF T2DM_OHA 의 cif_competing 이 모두 0 — "
+         f"other_dementia 경쟁위험 미분류 의심: {cif_competing}")
