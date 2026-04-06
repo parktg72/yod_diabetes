@@ -264,8 +264,8 @@ class StatisticalAnalyzer:
         for mname, mcols in models.items():
             cols = [c for c in mcols if c in df_prepared.columns] + [T, E]
             df_model = df_prepared[cols].dropna()
-            self._check_min_rows(df_model, context=f"run_cox {mname}")
             try:
+                self._check_min_rows(df_model, context=f"run_cox {mname}")
                 cph = CoxPHFitter()
                 cph.fit(df_model, duration_col=T, event_col=E)
                 result_entry = {'summary': cph.summary, 'concordance': cph.concordance_index_}
@@ -281,6 +281,8 @@ class StatisticalAnalyzer:
                 except Exception as ph_e:
                     logger.info(f"PH 검정 생략 ({mname}): {ph_e}")
                 results[mname] = result_entry
+            except InsufficientDataError as e:
+                logger.warning(f"Cox {mname} 데이터 부족 — 스킵: {e}")
             except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:
                 logger.exception(f"분석 오류 (Cox {mname})")
                 logger.warning(f"Cox {mname} 실패: {e}")
@@ -369,6 +371,9 @@ class StatisticalAnalyzer:
         lps_c = np.log(control['ps'] / (1 - control['ps']))
         # caliper: 0.2 × pooled SD of logit(PS) — treated/control 합산 분산 기준
         pooled_sd = np.sqrt((lps_t.var() + lps_c.var()) / 2)
+        if pooled_sd == 0:
+            logger.warning("PSM: pooled_sd = 0 — caliper = 0 이 되어 모든 매칭 거부됩니다 "
+                           "(treated/control logit(PS) 분산이 0, 데이터 다양성 부족)")
         caliper = float(STUDY_SETTINGS.get('PSM_CALIPER', 0.2)) * pooled_sd
 
         if len(control) < 1:
