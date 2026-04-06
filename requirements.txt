@@ -20,11 +20,6 @@ scikit-learn>=1.4.0
 # --- Visualization ---
 matplotlib>=3.8.4
 
-# --- DB Connectors ---
-# hdbcli: SAP HANA 클라이언트. PyPI 설치 가능하나 HANA 서버 접속 시에만 실제 사용됨.
-# HANA DB 없이 DuckDB 로컬 모드로만 사용한다면 설치를 건너뛰어도 됩니다.
-hdbcli>=2.21.0
-
 # --- System ---
 psutil>=5.9.8
 
