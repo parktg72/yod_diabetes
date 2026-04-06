@@ -158,7 +158,8 @@ def _widen_decimal_columns(storage, table_name):
         )
 
     for _, row in schema_df.iterrows():
-        if str(row['data_type']).upper() not in ('DECIMAL', 'NUMERIC'):
+        data_type_upper = str(row['data_type']).upper()
+        if not (data_type_upper.startswith('DECIMAL') or data_type_upper.startswith('NUMERIC')):
             continue
         try:
             prec = int(row['numeric_precision']) if row['numeric_precision'] is not None else DUCKDB_WIDE_DECIMAL_PRECISION
