@@ -61,3 +61,40 @@ def test_run_interaction_returns_none_when_too_few_events():
         result = analyzer.run_interaction(df_prepared=df)
     assert result is None, \
         f"MIN_EVENTS 미만 이벤트에서 run_interaction 이 None 을 반환해야 함: {result}"
+
+def test_run_cox_raises_when_all_models_fail():
+    """run_cox: 모든 모델 피팅 실패 시 RuntimeError 발생 (침묵 실패 방지)."""
+    import pytest as _pytest
+    n = 50
+    df = pd.DataFrame({
+        'exposure_group': ['T1DM'] * 25 + ['T2DM_OHA'] * 25,
+        'is_t1dm':        [1] * 25 + [0] * 25,
+        'is_t2dm_oha':    [0] * 25 + [1] * 25,
+        'is_t2dm_insulin':[0] * n,
+        'is_t2dm_nomed':  [0] * n,
+        'age_at_index':   [50.0] * n,
+        'male':           [1] * n,
+        'income_q':       [5] * n,
+        'comor_hypertension':  [0] * n,
+        'comor_dyslipidemia':  [0] * n,
+        'comor_depression':    [0] * n,
+        'comp_retinopathy':    [0] * n,
+        'comp_nephropathy':    [0] * n,
+        'comp_neuropathy':     [0] * n,
+        'comor_ischemic_stroke':   [0] * n,
+        'comor_hemorrhagic_stroke':[0] * n,
+        'comor_ihd':           [0] * n,
+        'comor_atrial_fib':    [0] * n,
+        'comor_heart_failure': [0] * n,
+        'comp_hypoglycemia':   [0] * n,
+        'follow_up_years':     [1.0] * n,
+        'dementia_event':      [1] * 15 + [0] * 35,
+    })
+    analyzer = _make_analyzer(df)
+    with patch('statistical_analysis.STUDY_SETTINGS',
+               {'MIN_VALID_ROWS': 10, 'MIN_EVENTS': 10, 'SAMPLING_SEED': 42,
+                'PH_ALPHA': 0.05}):
+        with patch('statistical_analysis.CoxPHFitter') as mock_cox_cls:
+            mock_cox_cls.return_value.fit.side_effect = ValueError("강제 실패")
+            with _pytest.raises(RuntimeError, match="모든 Cox 모델"):
+                analyzer.run_cox(df_prepared=df)

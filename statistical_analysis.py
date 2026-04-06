@@ -290,6 +290,12 @@ class StatisticalAnalyzer:
                 del df_model
                 gc.collect()
 
+        # 전체 모델 실패 감지
+        if not results:
+            raise RuntimeError(
+                f"run_cox {outcome}: 모든 Cox 모델 피팅 실패 — 결과 없음"
+            )
+
         # PH 검정 요약을 모델별로 취합하여 최상위에 저장
         ph_combined = {}
         for mname, entry in results.items():
