@@ -480,7 +480,7 @@ class CohortBuilder:
         """
         results = {}
 
-        def _safe_step(step_num, step_name, step_fn, result_table):
+        def _safe_step(step_num, step_name, step_fn, result_table, allow_zero=False):
             """단계 함수를 실행하고 CohortStepError로 감싼다."""
             for attempt in range(2):
                 try:
@@ -500,7 +500,7 @@ class CohortBuilder:
                     raise CohortStepError(step_num, step_name, e)
 
             n = self.dm.storage.get_row_count(result_table)
-            if n == 0:
+            if n == 0 and not allow_zero:
                 raise CohortStepError(
                     step_num, step_name,
                     ValueError(f"{result_table} 결과 0건 — 데이터 적재 상태를 확인하세요.")
@@ -522,7 +522,8 @@ class CohortBuilder:
 
         results['dm_meds'], _ = _safe_step(
             3, "당뇨 약물 처방 식별",
-            self.step3_dm_medications, "dm_medications"
+            self.step3_dm_medications, "dm_medications",
+            allow_zero=True
         )
         mem_manager.cleanup_after_step('step3')
 
