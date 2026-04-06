@@ -13,12 +13,10 @@ import numbers
 from decimal import Decimal
 import duckdb
 import pandas as pd
+import sys
 from pathlib import Path
 
-import sys
-from pathlib import Path as _Path
-
-_BASE_DIR = _Path(sys.executable).parent if getattr(sys, 'frozen', False) else _Path(__file__).parent
+_BASE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
 
 from config import DUCKDB_SETTINGS, EXAM_STRUCTURE
 from memory_manager import mem_manager, chunk_controller
