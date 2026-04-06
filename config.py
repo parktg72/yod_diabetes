@@ -259,11 +259,28 @@ APP_SETTINGS = {
 # ============================================================
 
 import json
+import os
 import sys
 from pathlib import Path
 
 _BASE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
-_SETTINGS_FILE = _BASE_DIR / 'yod_settings.json'
+
+
+def _resolve_settings_file() -> Path:
+    """설정 파일 경로 결정. frozen(PyInstaller) + Windows 에서는 %APPDATA%\\YodApp 우선."""
+    if getattr(sys, 'frozen', False) and os.name == 'nt':
+        appdata = os.environ.get('APPDATA', '')
+        if appdata:
+            d = Path(appdata) / 'YodApp'
+            try:
+                d.mkdir(parents=True, exist_ok=True)
+                return d / 'yod_settings.json'
+            except OSError:
+                pass  # APPDATA 쓰기 실패 시 _BASE_DIR 로 fallback
+    return _BASE_DIR / 'yod_settings.json'
+
+
+_SETTINGS_FILE = _resolve_settings_file()
 
 _SAVEABLE_SETTINGS = {
     'STUDY_SETTINGS': STUDY_SETTINGS,
