@@ -291,7 +291,9 @@ class HANAConnector:
             logger.info(f"HANA DB 연결 성공: {self.host}:{self.port}")
             return True
         except ImportError:
-            raise ImportError("hdbcli 패키지 필요: pip install hdbcli")
+            raise ImportError(
+                "hdbcli 패키지 필요: pip install -r requirements-hana.txt"
+            )
         except Exception as e:
             logger.error(f"HANA DB 연결 실패: {e}")
             raise

@@ -96,7 +96,7 @@ def test_run_cox_raises_when_all_models_fail():
                 'PH_ALPHA': 0.05}):
         with patch('statistical_analysis.CoxPHFitter') as mock_cox_cls:
             mock_cox_cls.return_value.fit.side_effect = ValueError("강제 실패")
-            with _pytest.raises(RuntimeError, match="모든 Cox 모델"):
+            with _pytest.raises(RuntimeError, match="Cox 회귀 분석"):
                 analyzer.run_cox(df_prepared=df)
 
 

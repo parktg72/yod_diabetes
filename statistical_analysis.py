@@ -296,7 +296,8 @@ class StatisticalAnalyzer:
         # 전체 모델 실패 감지
         if not results:
             raise RuntimeError(
-                f"run_cox {outcome}: 모든 Cox 모델 피팅 실패 — 결과 없음"
+                f"Cox 회귀 분석({outcome}) 실패: 모든 모델 피팅에 실패했습니다. "
+                f"데이터 크기나 공변량 구성을 확인하세요."
             )
 
         # PH 검정 요약을 모델별로 취합하여 최상위에 저장
