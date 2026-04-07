@@ -611,6 +611,17 @@ class HANAConnector:
                               chunk_size=None, progress_callback=None):
         # T20/T30/T40/T60: 월별 분할 추출 (where_clause 없는 경우에만)
         if duckdb_table.upper() in _MONTHLY_TABLES and where_clause is None:
+            if columns is not None:
+                logger.warning(
+                    "load_table_to_duckdb: %s 월별 추출 경로에서 columns 인수 무시됨 "
+                    "(MonthlyHanaExtractor는 전체 컬럼 추출)",
+                    duckdb_table,
+                )
+            if chunk_size is not None:
+                logger.warning(
+                    "load_table_to_duckdb: %s 월별 추출 경로에서 chunk_size 인수 무시됨",
+                    duckdb_table,
+                )
             extractor = MonthlyHanaExtractor(
                 self, duckdb_storage, hana_schema, _get_hana_cache_dir()
             )
@@ -762,10 +773,18 @@ class MonthlyHanaExtractor:
         _emit_progress(progress_callback, f"{table_upper} DuckDB 병합 중...")
         self.storage.drop_table(duckdb_table)
         files_sql = '[' + ', '.join(f"'{p}'" for p in parquet_files) + ']'
-        self.storage.execute(
-            f"CREATE TABLE {duckdb_table} AS "
-            f"SELECT * FROM read_parquet({files_sql}, union_by_name=true)"
-        )
+        try:
+            self.storage.execute(
+                f"CREATE TABLE {duckdb_table} AS "
+                f"SELECT * FROM read_parquet({files_sql}, union_by_name=true)"
+            )
+        except Exception as exc:
+            logger.error(
+                "월별 추출 DuckDB 병합 실패: %s — Parquet 파일은 %s 에 보존됨. "
+                "재실행하면 복구됩니다.",
+                exc, cache_dir,
+            )
+            raise
 
         total_rows = self.storage.get_row_count(duckdb_table)
         _create_indexes_with_progress(

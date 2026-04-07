@@ -117,7 +117,9 @@ def test_hana_loader_progress_callback_accepts_workerthread_style_string(monkeyp
     messages = []
 
     count = fake_hana.load_table_to_duckdb(
-        "T20", "NHISBASE", storage, "T20", progress_callback=messages.append
+        "T20", "NHISBASE", storage, "T20",
+        where_clause="STD_YYYY = '2020'",
+        progress_callback=messages.append,
     )
 
     assert count == 1
