@@ -131,6 +131,9 @@ python -m PyInstaller --noconfirm --onedir --windowed^
  --collect-all matplotlib^
  --collect-all pandas^
  --collect-all openpyxl^
+ --collect-all numpy^
+ --collect-all psutil^
+ --collect-all autograd^
  main_app.py
 
 if errorlevel 1 (
