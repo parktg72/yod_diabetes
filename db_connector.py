@@ -45,6 +45,35 @@ def _quote_identifier(name):
     return f'"{str(name).replace(chr(34), chr(34) * 2)}"'
 
 
+def _emit_progress(progress_callback, message, total=None, item_name=None):
+    """진행 메시지를 WorkerThread(string)와 레거시(total, name) 콜백 모두에 전달."""
+    if not progress_callback:
+        return
+    try:
+        progress_callback(message)
+    except TypeError:
+        if total is None or item_name is None:
+            raise
+        progress_callback(total, item_name)
+
+
+def _emit_chunk_progress(progress_callback, table_name, total):
+    _emit_progress(progress_callback, f"{table_name}: {total:,}건 적재 완료", total, table_name)
+
+
+def _create_indexes_with_progress(duckdb_storage, table_name, indexes, progress_callback=None):
+    if not indexes:
+        return
+    for columns in indexes:
+        cols_label = ', '.join(columns)
+        _emit_progress(
+            progress_callback,
+            f"{table_name}: 인덱스 생성 중... ({cols_label})"
+        )
+        duckdb_storage.create_index(table_name, columns)
+    _emit_progress(progress_callback, f"{table_name}: 인덱스 생성 완료")
+
+
 def _build_chunk_select_sql(chunk_df, temp_table_name):
     """등록된 임시 청크에서 타입 override를 반영한 SELECT SQL 생성."""
     type_overrides = chunk_df.attrs.get('duckdb_type_overrides', {})
@@ -615,15 +644,26 @@ class HANAConnector:
             chunk_controller.auto_adjust()
 
             if progress_callback:
-                progress_callback(total, hana_table)
+                _emit_chunk_progress(progress_callback, hana_table, total)
 
         if duckdb_table.upper() in ['T20', 'T30', 'T40', 'T60']:
-            duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO'])
-            duckdb_storage.create_index(duckdb_table, ['CMN_KEY'])
+            _create_indexes_with_progress(
+                duckdb_storage, duckdb_table,
+                [['INDI_DSCM_NO'], ['CMN_KEY']],
+                progress_callback=progress_callback
+            )
         elif duckdb_table.upper() == 'JK':
-            duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO', 'STD_YYYY'])
+            _create_indexes_with_progress(
+                duckdb_storage, duckdb_table,
+                [['INDI_DSCM_NO', 'STD_YYYY']],
+                progress_callback=progress_callback
+            )
         elif duckdb_table.upper() == 'DEATH':
-            duckdb_storage.create_index(duckdb_table, ['INDI_DSCM_NO'])
+            _create_indexes_with_progress(
+                duckdb_storage, duckdb_table,
+                [['INDI_DSCM_NO']],
+                progress_callback=progress_callback
+            )
 
         logger.info(f"DuckDB 적재: {duckdb_table} ({total:,}건)")
         return total
@@ -678,12 +718,20 @@ class SASFileLoader:
             chunk_controller.auto_adjust()
 
             if progress_callback:
-                progress_callback(total, table_name)
+                _emit_chunk_progress(progress_callback, table_name, total)
 
         if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
-            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO'])
+            _create_indexes_with_progress(
+                duckdb_storage, table_name,
+                [['INDI_DSCM_NO']],
+                progress_callback=progress_callback
+            )
         elif table_name.upper() == 'JK':
-            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO', 'STD_YYYY'])
+            _create_indexes_with_progress(
+                duckdb_storage, table_name,
+                [['INDI_DSCM_NO', 'STD_YYYY']],
+                progress_callback=progress_callback
+            )
 
         logger.info(f"SAS → DuckDB: {table_name} ({total:,}건)")
         return total
@@ -728,7 +776,7 @@ class SASFileLoader:
             chunk_controller.auto_adjust()
 
             if progress_callback:
-                progress_callback(total, table_name)
+                _emit_chunk_progress(progress_callback, table_name, total)
 
         return total
 
@@ -742,9 +790,17 @@ class SASFileLoader:
         )
         # Create indexes
         if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
-            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO'])
+            _create_indexes_with_progress(
+                duckdb_storage, table_name,
+                [['INDI_DSCM_NO']],
+                progress_callback=progress_callback
+            )
         elif table_name.upper() == 'JK':
-            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO', 'STD_YYYY'])
+            _create_indexes_with_progress(
+                duckdb_storage, table_name,
+                [['INDI_DSCM_NO', 'STD_YYYY']],
+                progress_callback=progress_callback
+            )
         logger.info(f"CSV → DuckDB: {table_name} ({count:,}건)")
         return count
 
@@ -790,7 +846,7 @@ class SASFileLoader:
             chunk_controller.auto_adjust()
 
             if progress_callback:
-                progress_callback(total, table_name)
+                _emit_chunk_progress(progress_callback, table_name, total)
 
         return total
 
@@ -847,16 +903,24 @@ class SASFileLoader:
 
             grand_total += count
             logger.info(f"  → {fname}: {count:,}건 (누적: {grand_total:,}건)")
+            _emit_progress(progress_callback, f"{table_name}: {fname} 완료 ({grand_total:,}건 누적)")
 
             # Inter-file memory cleanup
             mem_manager.force_cleanup()
 
         # Create indexes after all files loaded
         if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
-            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO'])
-            duckdb_storage.create_index(table_name, ['CMN_KEY'])
+            _create_indexes_with_progress(
+                duckdb_storage, table_name,
+                [['INDI_DSCM_NO'], ['CMN_KEY']],
+                progress_callback=progress_callback
+            )
         elif table_name.upper() == 'JK':
-            duckdb_storage.create_index(table_name, ['INDI_DSCM_NO', 'STD_YYYY'])
+            _create_indexes_with_progress(
+                duckdb_storage, table_name,
+                [['INDI_DSCM_NO', 'STD_YYYY']],
+                progress_callback=progress_callback
+            )
 
         logger.info(f"다중 파일 병합 완료: {table_name} ({grand_total:,}건, {len(file_paths)}개 파일)")
         return grand_total

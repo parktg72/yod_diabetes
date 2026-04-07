@@ -607,9 +607,14 @@ class DataLoadTab(QWidget):
                     if not dm.hana or not dm.hana.conn:
                         dm.connect_hana(hana_host, int(hana_port),
                                          hana_user, hana_pass)
-                    cnt = dm.load_from_hana(tn, src['schema'], src.get('hana_table', tn))
+                    cnt = dm.load_from_hana(
+                        tn, src['schema'], src.get('hana_table', tn),
+                        progress_callback=progress_callback
+                    )
                 elif src['type'] == 'sas':
-                    cnt = dm.load_from_sas(tn, src['path'])
+                    cnt = dm.load_from_sas(
+                        tn, src['path'], progress_callback=progress_callback
+                    )
                 elif src['type'] == 'sas_multi':
                     cnt = dm.load_from_files_multi(tn, src['paths'], file_type='sas',
                                                     progress_callback=progress_callback)
@@ -617,7 +622,9 @@ class DataLoadTab(QWidget):
                     cnt = dm.load_from_files_multi(tn, src['paths'], file_type='csv',
                                                     progress_callback=progress_callback)
                 else:
-                    cnt = dm.load_from_csv(tn, src['path'])
+                    cnt = dm.load_from_csv(
+                        tn, src['path'], progress_callback=progress_callback
+                    )
                 results[tn] = cnt
             return results
 

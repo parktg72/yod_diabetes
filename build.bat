@@ -1,4 +1,9 @@
 @echo off
+cd /d "%~dp0"
+if errorlevel 1 (
+    echo [ERROR] 스크립트 폴더로 이동 실패: %~dp0
+    pause & exit /b 1
+)
 setlocal enabledelayedexpansion
 chcp 65001 > nul
 echo === NHIS YOD-DM Analyzer v2.1 Build ===
@@ -31,6 +36,10 @@ if not exist venv (
 )
 
 call venv\Scripts\activate.bat
+if not exist venv\Scripts\python.exe (
+    echo [ERROR] 가상환경 활성화 실패 - venv\Scripts\python.exe 를 찾을 수 없습니다.
+    pause & exit /b 1
+)
 
 REM --- pip 업그레이드 ---
 echo [INFO] pip 업그레이드 중...
@@ -46,7 +55,7 @@ if errorlevel 1 (
 
 REM --- PyInstaller 설치 ---
 echo [INFO] PyInstaller 설치 중...
-python -m pip install --no-cache-dir "pyinstaller>=6.3,<7"
+python -m pip install --no-cache-dir "pyinstaller>=6.11,<7"
 if errorlevel 1 (
     echo [ERROR] PyInstaller 설치 실패
     pause & exit /b 1
@@ -58,15 +67,13 @@ if exist dist\NHIS_YOD_DM_Analyzer rmdir /s /q dist\NHIS_YOD_DM_Analyzer
 
 REM --- PyInstaller 빌드 ---
 echo [INFO] PyInstaller 빌드 중...
-pyinstaller --noconfirm --onedir --windowed^
+python -m PyInstaller --noconfirm --onedir --windowed^
  --name NHIS_YOD_DM_Analyzer^
  --hidden-import PyQt5.sip^
  --hidden-import PyQt5.QtCore^
  --hidden-import PyQt5.QtGui^
  --hidden-import PyQt5.QtWidgets^
  --hidden-import duckdb^
- --hidden-import hdbcli^
- --hidden-import hdbcli.dbapi^
  --hidden-import pyreadstat^
  --hidden-import lifelines^
  --hidden-import lifelines.statistics^
@@ -86,6 +93,7 @@ pyinstaller --noconfirm --onedir --windowed^
  --hidden-import sklearn.utils._typedefs^
  --hidden-import sklearn.utils._heap^
  --hidden-import sklearn.utils._sorting^
+ --hidden-import sklearn.utils._param_validation^
  --hidden-import scipy.stats^
  --hidden-import scipy.linalg^
  --hidden-import scipy.special^
@@ -111,6 +119,7 @@ pyinstaller --noconfirm --onedir --windowed^
  --hidden-import openpyxl.utils^
  --hidden-import openpyxl.utils.dataframe^
  --hidden-import psutil^
+ --hidden-import win32timezone^
  --hidden-import numpy^
  --collect-all lifelines^
  --collect-all duckdb^
@@ -119,7 +128,6 @@ pyinstaller --noconfirm --onedir --windowed^
  --collect-all formulaic^
  --collect-all pyreadstat^
  --collect-all matplotlib^
- --collect-all hdbcli^
  --collect-all pandas^
  --collect-all openpyxl^
  main_app.py

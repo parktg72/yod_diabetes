@@ -26,6 +26,7 @@ matplotlib>=3.8.4
 
 # --- System ---
 psutil>=5.9.8
+pywin32>=306
 
 # --- lifelines transitive deps ---
 formulaic>=0.6.6
