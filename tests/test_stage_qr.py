@@ -1,4 +1,4 @@
-"""tests/test_stage_q.py — Stage Q: progress emit 커버리지"""
+"""tests/test_stage_qr.py — Stage Q+R+S: progress emit 커버리지"""
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -212,8 +212,8 @@ def test_run_competing_risks_emits_skip_message_when_insufficient_rows():
     dm = MagicMock()
     analyzer = StatisticalAnalyzer(dm)
 
-    # MIN_VALID_ROWS=30 — 29행으로 스킵 유도
-    n = 29
+    from config import STUDY_SETTINGS
+    n = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30)) - 1  # 최소 행보다 1 적게
     df = pd.DataFrame({
         'exposure_group': ['NON_DM'] * n,
         'is_t1dm': [0] * n, 'is_t2dm_oha': [0] * n,

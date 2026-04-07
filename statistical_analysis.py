@@ -947,35 +947,35 @@ class StatisticalAnalyzer:
             if cb: cb("GPU 가속 모드로 분석을 실행합니다.")
 
         # Table 1은 항상 생성
-        self.generate_table1(cb, df_prepared)
+        self.generate_table1(cb=cb, df_prepared=df_prepared)
         mem_manager.cleanup_after_step('table1')
 
         if run_cox:
             for oc in ['dementia_event', 'ad_event', 'vad_event']:
-                self.run_cox(oc, cb, df_prepared)
+                self.run_cox(oc, cb=cb, df_prepared=df_prepared)
                 mem_manager.cleanup_after_step(f'cox_{oc}')
 
         if run_psm:
-            self.run_psm(cb, df_prepared)
+            self.run_psm(cb=cb, df_prepared=df_prepared)
             mem_manager.cleanup_after_step('psm')
 
         if run_interaction:
-            self.run_interaction(cb, df_prepared)
+            self.run_interaction(cb=cb, df_prepared=df_prepared)
             mem_manager.cleanup_after_step('interaction')
 
         if run_subgroup:
-            self.run_subgroup(cb, df_prepared)
+            self.run_subgroup(cb=cb, df_prepared=df_prepared)
             mem_manager.cleanup_after_step('subgroup')
 
         if run_competing_risks:
-            self.run_competing_risks(cb, df_prepared)
+            self.run_competing_risks(cb=cb, df_prepared=df_prepared)
             mem_manager.cleanup_after_step('competing_risks')
 
         del df_prepared
         gc.collect()
 
         if run_sensitivity:
-            self.run_sensitivity(cb)
+            self.run_sensitivity(cb=cb)
             mem_manager.cleanup_after_step('sensitivity')
 
         self.results['sampling_info'] = info
