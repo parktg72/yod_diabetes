@@ -609,6 +609,13 @@ class HANAConnector:
     def load_table_to_duckdb(self, hana_table, hana_schema, duckdb_storage,
                               duckdb_table, columns=None, where_clause=None,
                               chunk_size=None, progress_callback=None):
+        # T20/T30/T40/T60: 월별 분할 추출 (where_clause 없는 경우에만)
+        if duckdb_table.upper() in _MONTHLY_TABLES and where_clause is None:
+            extractor = MonthlyHanaExtractor(
+                self, duckdb_storage, hana_schema, _get_hana_cache_dir()
+            )
+            return extractor.extract_all_months(hana_table, duckdb_table, progress_callback)
+
         if chunk_size is None:
             chunk_size = chunk_controller.get_chunk('hana')
         first_chunk = True

@@ -252,3 +252,79 @@ class TestMonthlyHanaExtractor:
         execute_calls = [str(c) for c in mock_storage.execute.call_args_list]
         create_calls = [c for c in execute_calls if 'CREATE TABLE' in c and 'read_parquet' in c]
         assert len(create_calls) == 1, f"CREATE TABLE read_parquet 1회 기대. 실제: {create_calls}"
+
+    def test_load_table_routes_t20_to_extractor(self, tmp_path, monkeypatch):
+        """T20 where_clause=None 시 MonthlyHanaExtractor.extract_all_months 호출."""
+        from db_connector import HANAConnector, MonthlyHanaExtractor
+
+        mock_extractor = MagicMock()
+        mock_extractor.extract_all_months.return_value = 5000
+
+        def fake_init(hana_conn, storage, schema, cache_root):
+            return mock_extractor
+
+        monkeypatch.setattr('db_connector.MonthlyHanaExtractor', fake_init)
+        monkeypatch.setattr('db_connector._get_hana_cache_dir', lambda: tmp_path)
+
+        hana = HANAConnector.__new__(HANAConnector)
+        hana.conn = MagicMock()
+        mock_storage = MagicMock()
+
+        result = hana.load_table_to_duckdb('T20', 'NHIS', mock_storage, 'T20')
+
+        assert result == 5000
+        mock_extractor.extract_all_months.assert_called_once_with('T20', 'T20', None)
+
+    def test_load_table_skips_routing_when_where_clause(self, tmp_path, monkeypatch):
+        """where_clause 있으면 MonthlyHanaExtractor 생성 안 함."""
+        from db_connector import HANAConnector
+
+        created = []
+
+        def fake_init(*args, **kwargs):
+            created.append(True)
+            return MagicMock()
+
+        monkeypatch.setattr('db_connector.MonthlyHanaExtractor', fake_init)
+        monkeypatch.setattr('db_connector._get_hana_cache_dir', lambda: tmp_path)
+
+        hana = HANAConnector.__new__(HANAConnector)
+        hana.conn = MagicMock()
+        mock_storage = MagicMock()
+        mock_storage.drop_table.return_value = None
+        mock_storage.conn = MagicMock()
+
+        # fetch_table_chunked가 빈 이터레이터 반환 → 기존 경로 실행
+        hana.fetch_table_chunked = MagicMock(return_value=iter([]))
+
+        hana.load_table_to_duckdb(
+            'T20', 'NHIS', mock_storage, 'T20',
+            where_clause="INDI_DSCM_NO = 'A001'"
+        )
+
+        assert not created, "where_clause 있을 때 MonthlyHanaExtractor 생성 금지"
+
+    def test_load_table_skips_routing_for_non_monthly_table(self, tmp_path, monkeypatch):
+        """T20/T30/T40/T60 이외 테이블은 라우팅 안 함."""
+        from db_connector import HANAConnector
+
+        created = []
+
+        def fake_init(*args, **kwargs):
+            created.append(True)
+            return MagicMock()
+
+        monkeypatch.setattr('db_connector.MonthlyHanaExtractor', fake_init)
+        monkeypatch.setattr('db_connector._get_hana_cache_dir', lambda: tmp_path)
+
+        hana = HANAConnector.__new__(HANAConnector)
+        hana.conn = MagicMock()
+        mock_storage = MagicMock()
+        mock_storage.drop_table.return_value = None
+        mock_storage.conn = MagicMock()
+
+        hana.fetch_table_chunked = MagicMock(return_value=iter([]))
+
+        hana.load_table_to_duckdb('JK', 'NHIS', mock_storage, 'JK')
+
+        assert not created, "JK 테이블은 MonthlyHanaExtractor 생성 금지"
