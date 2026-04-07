@@ -50,6 +50,11 @@ def setup_korean_font():
             if any(k in font.name for k in ['Gothic', 'Nanum', 'Malgun', 'CJK', 'Noto']):
                 plt.rcParams['font.family'] = font.name
                 break
+        else:
+            logger.warning(
+                "한국어 폰트를 찾을 수 없습니다. 그래프의 한국어 텍스트가 깨져 보일 수 있습니다. "
+                "Windows: C:/Windows/Fonts/malgun.ttf 설치 확인"
+            )
 
     plt.rcParams['axes.unicode_minus'] = False
 
