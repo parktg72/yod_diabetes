@@ -238,3 +238,43 @@ def test_main_app_on_error_hides_progress_bar():
         main_app.MainWindow._on_error(mw, "테스트 오류")
     mw.progress_bar.setVisible.assert_called_once_with(False)
     mw._set_action_buttons_enabled.assert_called_once_with(True)
+
+
+def test_run_interaction_standalone_passes_cb_to_load_data(monkeypatch):
+    """run_interaction(cb=..., df_prepared=None) 시 _load_data 에 cb 전달."""
+    dm = MagicMock()
+    analyzer = StatisticalAnalyzer(dm)
+    load_cb_received = []
+
+    def patched_load(cb=None):
+        load_cb_received.append(cb)
+        raise pd.errors.EmptyDataError("테스트 중단")
+
+    monkeypatch.setattr(analyzer, '_load_data', patched_load)
+    cb = MagicMock()
+    try:
+        analyzer.run_interaction(cb=cb, df_prepared=None)
+    except Exception:
+        pass
+    assert load_cb_received and load_cb_received[0] is cb, \
+        f"run_interaction fallback: cb 미전달. received={load_cb_received}"
+
+
+def test_run_subgroup_standalone_passes_cb_to_load_data(monkeypatch):
+    """run_subgroup(cb=..., df_prepared=None) 시 _load_data 에 cb 전달."""
+    dm = MagicMock()
+    analyzer = StatisticalAnalyzer(dm)
+    load_cb_received = []
+
+    def patched_load(cb=None):
+        load_cb_received.append(cb)
+        raise pd.errors.EmptyDataError("테스트 중단")
+
+    monkeypatch.setattr(analyzer, '_load_data', patched_load)
+    cb = MagicMock()
+    try:
+        analyzer.run_subgroup(cb=cb, df_prepared=None)
+    except Exception:
+        pass
+    assert load_cb_received and load_cb_received[0] is cb, \
+        f"run_subgroup fallback: cb 미전달. received={load_cb_received}"

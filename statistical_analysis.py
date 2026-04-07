@@ -467,8 +467,8 @@ class StatisticalAnalyzer:
     def run_interaction(self, cb=None, df_prepared=None):
         if cb: cb("상호작용 분석 중...")
         if df_prepared is None:
-            raw, _ = self._load_data()
-            df_prepared = self._prepare(raw)
+            raw, _ = self._load_data(cb=cb)
+            df_prepared = self._prepare(raw, cb=cb)
 
         df_dm = df_prepared[df_prepared['exposure_group'] != 'NON_DM']
         if 'dm_duration_cat' not in df_dm.columns:
@@ -515,8 +515,8 @@ class StatisticalAnalyzer:
     def run_subgroup(self, cb=None, df_prepared=None):
         if cb: cb("하위그룹 분석 중...")
         if df_prepared is None:
-            raw, _ = self._load_data()
-            df_prepared = self._prepare(raw)
+            raw, _ = self._load_data(cb=cb)
+            df_prepared = self._prepare(raw, cb=cb)
         df = df_prepared  # 참조만 (copy 안 함)
 
         subgroups = {
@@ -653,8 +653,8 @@ class StatisticalAnalyzer:
         if use_gpu_cif and cb:
             cb("경쟁위험 분석: GPU 가속 CIF 계산 활성화")
         if df_prepared is None:
-            raw, _ = self._load_data()
-            df_prepared = self._prepare(raw)
+            raw, _ = self._load_data(cb=cb)
+            df_prepared = self._prepare(raw, cb=cb)
 
         if 'competing_death_event' not in df_prepared.columns:
             logger.warning("competing_death_event 컬럼 없음 — 코호트 재구축 필요")
@@ -850,8 +850,8 @@ class StatisticalAnalyzer:
     def generate_table1(self, cb=None, df_prepared=None):
         if cb: cb("Table 1 생성 중...")
         if df_prepared is None:
-            raw, _ = self._load_data()
-            df_prepared = self._prepare(raw)
+            raw, _ = self._load_data(cb=cb)
+            df_prepared = self._prepare(raw, cb=cb)
 
         groups = sorted(df_prepared['exposure_group'].unique())
         rows = []
