@@ -609,8 +609,8 @@ class HANAConnector:
     def load_table_to_duckdb(self, hana_table, hana_schema, duckdb_storage,
                               duckdb_table, columns=None, where_clause=None,
                               chunk_size=None, progress_callback=None):
-        # T20/T30/T40/T60: 월별 분할 추출 (where_clause 없는 경우에만)
-        if duckdb_table.upper() in _MONTHLY_TABLES and where_clause is None:
+        # hana_table 기준으로 라우팅: T20/T30/T40/T60 HANA 소스 테이블은 월별 추출
+        if hana_table.upper() in _MONTHLY_TABLES and where_clause is None:
             if columns is not None:
                 logger.warning(
                     "load_table_to_duckdb: %s 월별 추출 경로에서 columns 인수 무시됨 "
@@ -666,7 +666,7 @@ class HANAConnector:
             if progress_callback:
                 _emit_chunk_progress(progress_callback, hana_table, total)
 
-        if duckdb_table.upper() in ['T20', 'T30', 'T40', 'T60']:
+        if duckdb_table.upper() in _MONTHLY_TABLES:
             _create_indexes_with_progress(
                 duckdb_storage, duckdb_table,
                 [['INDI_DSCM_NO'], ['CMN_KEY']],
@@ -720,6 +720,11 @@ class MonthlyHanaExtractor:
         from config import STUDY_SETTINGS
         start_year = int(STUDY_SETTINGS.get('STUDY_START_YEAR', 2013))
         end_year = int(STUDY_SETTINGS.get('STUDY_END_YEAR', 2024))
+        if start_year > end_year:
+            raise ValueError(
+                f"STUDY_START_YEAR({start_year}) > STUDY_END_YEAR({end_year}): "
+                "config.py 설정을 확인하세요."
+            )
         months = []
         for year in range(start_year, end_year + 1):
             for month in range(1, 13):
@@ -739,10 +744,16 @@ class MonthlyHanaExtractor:
         months = self._month_range()
         total = len(months)
         parquet_files = []
+        schema_columns = None
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
 
         for idx, yyyymm in enumerate(months, 1):
             parquet_path = cache_dir / f'{table_upper}_{yyyymm}.parquet'
             tmp_path = cache_dir / f'{table_upper}_{yyyymm}.tmp.parquet'
+            # MDCARE_STRT_YYYYMM 컬럼은 VARCHAR/NVARCHAR 타입 가정 (문자열 비교)
+            # INTEGER 타입인 경우 where_clause 없이 전체 테이블 로드 후 필터링 필요
             where_clause = f"{_MONTHLY_FILTER_COL} = '{yyyymm}'"
 
             _emit_progress(
@@ -750,29 +761,50 @@ class MonthlyHanaExtractor:
                 f"{table_upper} {yyyymm[:4]}-{yyyymm[4:]} 추출 중 ({idx}/{total})"
             )
 
-            frames = []
+            # 월별 청크를 PyArrow ParquetWriter로 스트리밍 저장 (메모리 효율)
+            writer = None
+            month_rows = 0
             for chunk_df in self.hana.fetch_table_chunked(
                 table_name, self.schema,
                 where_clause=where_clause
             ):
                 chunk_df = _prepare_chunk_for_duckdb(chunk_df)
-                frames.append(chunk_df)
+                arrow_table = pa.Table.from_pandas(chunk_df, preserve_index=False)
+                if writer is None:
+                    writer = pq.ParquetWriter(str(tmp_path), arrow_table.schema)
+                    if schema_columns is None:
+                        schema_columns = list(chunk_df.columns)
+                writer.write_table(arrow_table)
+                month_rows += len(chunk_df)
+                del chunk_df, arrow_table
                 gc.collect()
 
-            if frames:
-                pd.concat(frames, ignore_index=True).to_parquet(str(tmp_path), index=False)
+            if writer is not None:
+                writer.close()
             else:
-                pd.DataFrame().to_parquet(str(tmp_path), index=False)
+                # 빈 월: 이미 수집된 스키마로 0행 Parquet 저장 (schema_columns 없으면 무컬럼)
+                empty_df = (
+                    pd.DataFrame(columns=schema_columns)
+                    if schema_columns is not None
+                    else pd.DataFrame()
+                )
+                empty_df.to_parquet(str(tmp_path), index=False)
 
-            tmp_path.rename(parquet_path)
+            tmp_path.replace(parquet_path)
             parquet_files.append(parquet_path)
-            del frames
             gc.collect()
+
+        if schema_columns is None:
+            logger.warning(
+                "월별 추출 경고: %s 전체 144개월 데이터가 0건입니다. "
+                "MDCARE_STRT_YYYYMM 컬럼 타입(VARCHAR 가정)을 확인하세요.",
+                table_upper,
+            )
 
         # Parquet → DuckDB 병합 (단일 CREATE TABLE, union_by_name으로 컬럼 드리프트 대응)
         _emit_progress(progress_callback, f"{table_upper} DuckDB 병합 중...")
         self.storage.drop_table(duckdb_table)
-        files_sql = '[' + ', '.join(f"'{p}'" for p in parquet_files) + ']'
+        files_sql = '[' + ', '.join(f"'{p.as_posix()}'" for p in parquet_files) + ']'
         try:
             self.storage.execute(
                 f"CREATE TABLE {duckdb_table} AS "
@@ -848,7 +880,7 @@ class SASFileLoader:
             if progress_callback:
                 _emit_chunk_progress(progress_callback, table_name, total)
 
-        if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
+        if table_name.upper() in _MONTHLY_TABLES:
             _create_indexes_with_progress(
                 duckdb_storage, table_name,
                 [['INDI_DSCM_NO']],
@@ -917,7 +949,7 @@ class SASFileLoader:
             progress_callback=progress_callback
         )
         # Create indexes
-        if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
+        if table_name.upper() in _MONTHLY_TABLES:
             _create_indexes_with_progress(
                 duckdb_storage, table_name,
                 [['INDI_DSCM_NO']],
@@ -1037,7 +1069,7 @@ class SASFileLoader:
             mem_manager.force_cleanup()
 
         # Create indexes after all files loaded
-        if table_name.upper() in ['T20', 'T30', 'T40', 'T60']:
+        if table_name.upper() in _MONTHLY_TABLES:
             _create_indexes_with_progress(
                 duckdb_storage, table_name,
                 [['INDI_DSCM_NO'], ['CMN_KEY']],
