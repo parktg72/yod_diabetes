@@ -958,6 +958,7 @@ class AnalysisTab(QWidget):
 
         from main_app import WorkerThread
         self._post_worker = WorkerThread(do_post)
+        mw.worker = self._post_worker  # closeEvent 에서 cleanup 가능하도록 등록
         self._post_worker.progress.connect(self.log_signal.emit)
         self._post_worker.finished.connect(self._on_post_analysis)
         self._post_worker.error.connect(mw._on_error)
