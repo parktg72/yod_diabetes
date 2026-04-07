@@ -936,8 +936,6 @@ class AnalysisTab(QWidget):
 
     def _on_analysis(self, data):
         mw = self.ctx.main_window
-        mw.progress_bar.setVisible(False)
-        mw._set_action_buttons_enabled(True)
         ar = data.get('result', {})
         self.ctx.all_results['analysis'] = ar
 
@@ -950,12 +948,28 @@ class AnalysisTab(QWidget):
             self._sampling_label = ""
             self.ctx.sampling_label = ""
 
-        # 시각화 + 내보내기 (GUI 비의존 모듈로 분리)
-        from analysis_runner import run_post_analysis
-        result = run_post_analysis(self.ctx.dm, ar, self.ctx.results_dir, log=self.log_signal.emit)
+        # 시각화 + 내보내기를 별도 WorkerThread 로 실행 (메인 스레드 블로킹 방지)
+        self.log_signal.emit("시각화 및 결과 내보내기 중...")
+
+        def do_post(progress_callback=None):
+            from analysis_runner import run_post_analysis
+            _log = progress_callback or (lambda m: None)
+            return run_post_analysis(self.ctx.dm, ar, self.ctx.results_dir, log=_log)
+
+        from main_app import WorkerThread
+        self._post_worker = WorkerThread(do_post)
+        self._post_worker.progress.connect(self.log_signal.emit)
+        self._post_worker.finished.connect(self._on_post_analysis)
+        self._post_worker.error.connect(mw._on_error)
+        self._post_worker.start()
+
+    def _on_post_analysis(self, data):
+        mw = self.ctx.main_window
+        mw.progress_bar.setVisible(False)
+        mw._set_action_buttons_enabled(True)
+        result = data.get('result', {})
         for err in result.get('errors', []):
             self.log_signal.emit(err)
-
         self.log_signal.emit(f"분석 완료! 결과: {self.ctx.results_dir}")
         QMessageBox.information(self, "완료", f"분석 완료\n{self.ctx.results_dir}")
 
