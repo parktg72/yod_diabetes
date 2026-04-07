@@ -160,8 +160,8 @@ class MemoryManager:
         """분석 시 메모리에 올릴 안전한 최대 행수"""
         info = self.get_memory_info()
         available_gb = info['available_gb']
-        # 행당 약 2KB 추정, 가용 메모리의 30% 사용
-        safe_rows = int(available_gb * 0.3 * 1024 * 1024 * 1024 / 2048)
+        # 행당 약 4KB 추정 (의료 DataFrame 실측), 가용 메모리의 20% 사용
+        safe_rows = int(available_gb * 0.2 * 1024 * 1024 * 1024 / 4096)
         max_rows = MEMORY_SETTINGS.get('MAX_DF_ROWS_IN_MEMORY', 500000)
         return min(safe_rows, max_rows)
 
