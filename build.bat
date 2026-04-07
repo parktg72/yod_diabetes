@@ -58,6 +58,20 @@ if errorlevel 1 (
 )
 call :cleanup_dist
 
+REM --- SAP HANA 드라이버 선택 설치 (없어도 빌드 계속 진행) ---
+if exist requirements-hana.txt (
+    echo [INFO] SAP HANA 드라이버 설치 중 (requirements-hana.txt)...
+    python -m pip install --no-cache-dir -r requirements-hana.txt
+    if errorlevel 1 (
+        echo [WARN] hdbcli 설치 실패 - HANA DB 연결 기능 없이 빌드 진행합니다.
+    ) else (
+        echo [INFO] hdbcli 설치 완료
+    )
+) else (
+    echo [INFO] requirements-hana.txt 없음 - HANA DB 연결 기능 없이 빌드 진행합니다.
+)
+call :cleanup_dist
+
 REM --- PyInstaller 설치 ---
 echo [INFO] PyInstaller 설치 중...
 python -m pip install --no-cache-dir "pyinstaller>=6.11,<7"
@@ -103,6 +117,8 @@ python -m PyInstaller --noconfirm --onedir --windowed^
  --hidden-import scipy.special^
  --hidden-import scipy.sparse^
  --hidden-import scipy.optimize^
+ --hidden-import scipy.integrate^
+ --hidden-import scipy.interpolate^
  --hidden-import matplotlib^
  --hidden-import matplotlib.backends.backend_agg^
  --hidden-import matplotlib.backends.backend_pdf^
@@ -134,6 +150,9 @@ python -m PyInstaller --noconfirm --onedir --windowed^
  --collect-all numpy^
  --collect-all psutil^
  --collect-all autograd^
+ --collect-all hdbcli^
+ --hidden-import hdbcli^
+ --hidden-import hdbcli.dbapi^
  main_app.py
 
 if errorlevel 1 (
