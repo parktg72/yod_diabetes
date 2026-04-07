@@ -26,6 +26,10 @@ class CohortBuilder:
 
         성공 시 result_table의 행 수 반환.
         실패(duckdb.Error) 또는 결과 0건 시 CohortStepError 발생.
+
+        Note: build_cohort 는 step_fn 기반 _safe_step 내부 함수를 사용한다.
+              이 메서드는 단위 테스트(test_cohort_safety.py)에서 재시도·검증 로직
+              직접 검증용으로 노출되어 있다.
         """
         for attempt in range(2):
             try:
