@@ -1,11 +1,11 @@
 @echo off
+chcp 65001 > nul
 cd /d "%~dp0"
 if errorlevel 1 (
     echo [ERROR] 스크립트 폴더로 이동 실패: %~dp0
     pause & exit /b 1
 )
 setlocal enabledelayedexpansion
-chcp 65001 > nul
 echo === NHIS YOD-DM Analyzer v2.1 Build ===
 
 REM --- Python 3.12 설치 확인 ---
