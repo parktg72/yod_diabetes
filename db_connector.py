@@ -709,8 +709,66 @@ class MonthlyHanaExtractor:
         return months
 
     def extract_all_months(self, table_name, duckdb_table, progress_callback=None):
-        """구현 예정 (Task 3에서 추가)."""
-        raise NotImplementedError
+        """모든 월 추출 → Parquet 저장 → DuckDB 병합."""
+        table_upper = table_name.upper()
+        cache_dir = self.cache_root / table_upper
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # 전체 재추출: 기존 Parquet 삭제
+        for f in cache_dir.glob(f'{table_upper}_*.parquet'):
+            f.unlink()
+
+        months = self._month_range()
+        total = len(months)
+        parquet_files = []
+
+        for idx, yyyymm in enumerate(months, 1):
+            parquet_path = cache_dir / f'{table_upper}_{yyyymm}.parquet'
+            tmp_path = cache_dir / f'{table_upper}_{yyyymm}.tmp.parquet'
+            where_clause = f"{_MONTHLY_FILTER_COL} = '{yyyymm}'"
+
+            _emit_progress(
+                progress_callback,
+                f"{table_upper} {yyyymm[:4]}-{yyyymm[4:]} 추출 중 ({idx}/{total})"
+            )
+
+            frames = []
+            for chunk_df in self.hana.fetch_table_chunked(
+                table_name, self.schema,
+                where_clause=where_clause
+            ):
+                chunk_df = _prepare_chunk_for_duckdb(chunk_df)
+                frames.append(chunk_df)
+                gc.collect()
+
+            if frames:
+                pd.concat(frames, ignore_index=True).to_parquet(str(tmp_path), index=False)
+            else:
+                pd.DataFrame().to_parquet(str(tmp_path), index=False)
+
+            tmp_path.rename(parquet_path)
+            parquet_files.append(parquet_path)
+            del frames
+            gc.collect()
+
+        # Parquet → DuckDB 병합 (단일 CREATE TABLE, union_by_name으로 컬럼 드리프트 대응)
+        _emit_progress(progress_callback, f"{table_upper} DuckDB 병합 중...")
+        self.storage.drop_table(duckdb_table)
+        files_sql = '[' + ', '.join(f"'{p}'" for p in parquet_files) + ']'
+        self.storage.execute(
+            f"CREATE TABLE {duckdb_table} AS "
+            f"SELECT * FROM read_parquet({files_sql}, union_by_name=true)"
+        )
+
+        total_rows = self.storage.get_row_count(duckdb_table)
+        _create_indexes_with_progress(
+            self.storage, duckdb_table,
+            [['INDI_DSCM_NO'], ['CMN_KEY']],
+            progress_callback=progress_callback
+        )
+
+        logger.info(f"월별 추출 완료: {duckdb_table} ({total_rows:,}건, {total}개월)")
+        return total_rows
 
 
 class SASFileLoader:

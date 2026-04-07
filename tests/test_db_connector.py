@@ -151,3 +151,104 @@ class TestMonthlyHanaExtractor:
         months = extractor._month_range()
         assert months[11] == '201312'
         assert months[12] == '201401'
+
+    def test_extract_deletes_existing_cache(self, tmp_path):
+        """시작 시 기존 Parquet 파일 삭제 확인."""
+        import pandas as pd
+        cache_dir = tmp_path / 'T20'
+        cache_dir.mkdir()
+        stale = cache_dir / 'T20_201212.parquet'
+        # 0행 Parquet 생성
+        pd.DataFrame().to_parquet(str(stale))
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 0
+
+        from db_connector import MonthlyHanaExtractor
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        extractor.extract_all_months('T20', 'T20')
+
+        assert not stale.exists(), "기존 stale Parquet 파일이 삭제되어야 함"
+
+    def test_extract_calls_fetch_with_monthly_where(self, tmp_path):
+        """각 월에 MDCARE_STRT_YYYYMM WHERE 절을 사용해 fetch 호출 확인."""
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 0
+
+        from db_connector import MonthlyHanaExtractor
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        extractor.extract_all_months('T20', 'T20')
+
+        call_args_list = mock_hana.fetch_table_chunked.call_args_list
+        assert len(call_args_list) == 144, f"144회 호출 기대, 실제: {len(call_args_list)}"
+        # 첫 번째 호출: 2013년 1월
+        first_kwargs = call_args_list[0].kwargs
+        assert first_kwargs.get('where_clause') == "MDCARE_STRT_YYYYMM = '201301'", \
+            f"첫 WHERE 절 오류: {first_kwargs}"
+        # 마지막 호출: 2024년 12월
+        last_kwargs = call_args_list[-1].kwargs
+        assert last_kwargs.get('where_clause') == "MDCARE_STRT_YYYYMM = '202412'", \
+            f"마지막 WHERE 절 오류: {last_kwargs}"
+
+    def test_extract_creates_parquet_per_month(self, tmp_path):
+        """144개 Parquet 파일 생성 확인 (행 있는 달 + 빈 달 모두)."""
+        import pandas as pd
+
+        df_sample = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
+
+        def fake_fetch(table, schema, where_clause=None):
+            if where_clause and '201301' in where_clause:
+                yield df_sample
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.side_effect = fake_fetch
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 1
+
+        from db_connector import MonthlyHanaExtractor
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        extractor.extract_all_months('T20', 'T20')
+
+        parquet_files = list((tmp_path / 'T20').glob('T20_*.parquet'))
+        assert len(parquet_files) == 144, f"144개 Parquet 기대, 실제: {len(parquet_files)}"
+        assert (tmp_path / 'T20' / 'T20_201301.parquet').exists()
+        assert (tmp_path / 'T20' / 'T20_202412.parquet').exists()
+        # .tmp 파일이 남아있으면 안됨 (원자적 rename 확인)
+        tmp_files = list((tmp_path / 'T20').glob('*.tmp.parquet'))
+        assert not tmp_files, f".tmp 잔류 파일: {tmp_files}"
+
+    def test_extract_emits_progress_per_month(self, tmp_path):
+        """각 월 및 DuckDB 병합 진행 메시지 emit 확인."""
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 0
+
+        messages = []
+        from db_connector import MonthlyHanaExtractor
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        extractor.extract_all_months('T20', 'T20', progress_callback=messages.append)
+
+        assert any('2013-01' in m for m in messages), f"2013-01 메시지 없음. 실제: {messages[:3]}"
+        assert any('2024-12' in m for m in messages), f"2024-12 메시지 없음."
+        assert any('DuckDB 병합' in m for m in messages), f"DuckDB 병합 메시지 없음."
+
+    def test_extract_calls_duckdb_merge_once(self, tmp_path):
+        """DuckDB merge는 execute로 CREATE TABLE 단일 호출 확인."""
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 0
+
+        from db_connector import MonthlyHanaExtractor
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        extractor.extract_all_months('T20', 'T20')
+
+        # execute 호출 중 CREATE TABLE ... read_parquet 포함 확인
+        execute_calls = [str(c) for c in mock_storage.execute.call_args_list]
+        create_calls = [c for c in execute_calls if 'CREATE TABLE' in c and 'read_parquet' in c]
+        assert len(create_calls) == 1, f"CREATE TABLE read_parquet 1회 기대. 실제: {create_calls}"
