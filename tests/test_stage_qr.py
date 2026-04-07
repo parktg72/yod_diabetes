@@ -278,3 +278,53 @@ def test_run_subgroup_standalone_passes_cb_to_load_data(monkeypatch):
         pass
     assert load_cb_received and load_cb_received[0] is cb, \
         f"run_subgroup fallback: cb 미전달. received={load_cb_received}"
+
+
+def test_run_interaction_emits_skip_when_no_dm_duration_cat():
+    """dm_duration_cat 컬럼 없을 때 스킵 메시지를 emit 해야 한다."""
+    dm = MagicMock()
+    analyzer = StatisticalAnalyzer(dm)
+
+    n = 40
+    df = pd.DataFrame({
+        'exposure_group': ['T1DM'] * n,
+        'is_t1dm': [1] * n,
+        'age_at_index': [60.0] * n,
+        'male': [1] * n,
+        'income_q': [3] * n,
+        'cci_score': [1] * n,
+        'follow_up_years': [2.0] * n,
+        'dementia_event': [0] * 30 + [1] * 10,
+        # dm_duration_cat 컬럼 의도적으로 누락
+    })
+    messages = []
+    analyzer.run_interaction(cb=messages.append, df_prepared=df)
+
+    skip_msgs = [m for m in messages if '스킵' in m or 'dm_duration_cat' in m]
+    assert skip_msgs, f"dm_duration_cat 없을 때 스킵 메시지 없음. 실제: {messages}"
+
+
+def test_run_interaction_emits_skip_when_insufficient_data():
+    """행/이벤트 수 부족 시 스킵 메시지를 emit 해야 한다."""
+    from config import STUDY_SETTINGS
+    dm = MagicMock()
+    analyzer = StatisticalAnalyzer(dm)
+
+    min_rows = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
+    n = min_rows - 1  # 최소 행 미달
+    df = pd.DataFrame({
+        'exposure_group': ['T1DM'] * n,
+        'is_t1dm': [1] * n,
+        'dm_duration_cat': ['<5yr'] * n,
+        'age_at_index': [60.0] * n,
+        'male': [1] * n,
+        'income_q': [3] * n,
+        'cci_score': [1] * n,
+        'follow_up_years': [2.0] * n,
+        'dementia_event': [0] * n,  # 이벤트 0개 — 이중 조건 위반
+    })
+    messages = []
+    analyzer.run_interaction(cb=messages.append, df_prepared=df)
+
+    skip_msgs = [m for m in messages if '스킵' in m or '부족' in m]
+    assert skip_msgs, f"데이터 부족 시 스킵 메시지 없음. 실제: {messages}"

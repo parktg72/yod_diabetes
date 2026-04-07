@@ -472,6 +472,7 @@ class StatisticalAnalyzer:
 
         df_dm = df_prepared[df_prepared['exposure_group'] != 'NON_DM']
         if 'dm_duration_cat' not in df_dm.columns:
+            if cb: cb("상호작용 분석 스킵: dm_duration_cat 컬럼 없음")
             return None
 
         # ★ 필요 컬럼만 복사
@@ -494,6 +495,11 @@ class StatisticalAnalyzer:
             logger.warning(
                 "run_interaction: 데이터 부족 — 행 수 %d (최소 %d), 이벤트 수 %d (최소 %d) — 분석 스킵",
                 len(d), _min_rows, int(d['dementia_event'].sum()), _min_events,
+            )
+            if cb: cb(
+                f"상호작용 분석 스킵: 데이터 부족 "
+                f"({len(d)}행/{int(d['dementia_event'].sum())}이벤트, "
+                f"최소 {_min_rows}행/{_min_events}이벤트 필요)"
             )
             return None
 
