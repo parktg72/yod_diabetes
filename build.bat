@@ -41,13 +41,17 @@ if not exist venv\Scripts\python.exe (
     pause & exit /b 1
 )
 
+REM --- 이전 실행 잔류 손상 dist-info 사전 정리 ---
+for /d %%i in (venv\Lib\site-packages\~*) do rmdir /s /q "%%i" 2>nul
+for %%i in (venv\Lib\site-packages\~*) do del /q "%%i" 2>nul
+
 REM --- pip 업그레이드 ---
 echo [INFO] pip 업그레이드 중...
 python -m pip install --no-cache-dir --upgrade pip
 
 REM --- pip 업그레이드 후 잔류 임시 배포 정리 (~ip 등 손상된 .dist-info 제거) ---
-for /d %%i in ("venv\Lib\site-packages\~*") do rmdir /s /q "%%i" 2>nul
-for %%i in ("venv\Lib\site-packages\~*") do del /q "%%i" 2>nul
+for /d %%i in (venv\Lib\site-packages\~*) do rmdir /s /q "%%i" 2>nul
+for %%i in (venv\Lib\site-packages\~*) do del /q "%%i" 2>nul
 
 REM --- 의존 패키지 설치 ---
 echo [INFO] 패키지 설치 중 (requirements.txt)...
@@ -56,6 +60,8 @@ if errorlevel 1 (
     echo [ERROR] requirements.txt 패키지 설치 실패
     pause & exit /b 1
 )
+for /d %%i in (venv\Lib\site-packages\~*) do rmdir /s /q "%%i" 2>nul
+for %%i in (venv\Lib\site-packages\~*) do del /q "%%i" 2>nul
 
 REM --- PyInstaller 설치 ---
 echo [INFO] PyInstaller 설치 중...
@@ -64,6 +70,8 @@ if errorlevel 1 (
     echo [ERROR] PyInstaller 설치 실패
     pause & exit /b 1
 )
+for /d %%i in (venv\Lib\site-packages\~*) do rmdir /s /q "%%i" 2>nul
+for %%i in (venv\Lib\site-packages\~*) do del /q "%%i" 2>nul
 
 REM --- 이전 빌드 정리 ---
 if exist build rmdir /s /q build
