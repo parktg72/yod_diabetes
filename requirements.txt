@@ -26,7 +26,7 @@ matplotlib>=3.8.4
 
 # --- System ---
 psutil>=5.9.8
-pywin32>=306
+pywin32>=306  # Windows 전용 — macOS/Linux 에서는 무시됨 (win32timezone PyInstaller 포함 필요)
 
 # --- lifelines transitive deps ---
 formulaic>=0.6.6
