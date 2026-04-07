@@ -125,7 +125,7 @@ def dm():
         INSERT INTO T40 VALUES
         ('P001','I101','20140501'),
         ('P001','E1031','20140801'),
-        ('P002','E7801','20150301'),
+        ('P002','E7801','20151001'),
         ('P002','F321','20150601'),
         ('P002','I211','20160101')
     """)
@@ -340,6 +340,45 @@ class TestGenerateComorbidities:
         comor_cols = [c for c in df.columns if c.startswith('comor_')]
         for col in comor_cols:
             assert df[col].iloc[0] == 0, f"P003 {col} should be 0"
+
+
+# ---------------------------------------------------------------------------
+# 3b. LOOKBACK_YEARS 필터 + 흡연력 Former 케이스
+# ---------------------------------------------------------------------------
+class TestLookbackYearsFilter:
+    def test_out_of_window_diagnosis_excluded(self, dm, vg):
+        """LOOKBACK_YEARS=1: index_date 1년 초과 이전 진단은 _t40_pre_index에서 제외"""
+        # P001 index=20150101 → window: 20140101~20150101
+        # 20130601 record is outside the window (> 1 year before index)
+        dm.execute("INSERT INTO T40 VALUES ('P001','I999','20130601')")
+        vg._create_t40_filtered()
+        result = dm.query(
+            "SELECT COUNT(*) AS n FROM _t40_pre_index "
+            "WHERE INDI_DSCM_NO='P001' AND MCEX_SICK_SYM='I999'"
+        )
+        assert result.iloc[0]['n'] == 0, "out-of-window record should not appear in _t40_pre_index"
+
+    def test_in_window_diagnosis_included(self, dm, vg):
+        """LOOKBACK_YEARS=1: window 내 진단은 _t40_pre_index에 포함"""
+        # P001 I101 on 20140501 is within window (20140101~20150101)
+        vg._create_t40_filtered()
+        result = dm.query(
+            "SELECT COUNT(*) AS n FROM _t40_pre_index "
+            "WHERE INDI_DSCM_NO='P001' AND MCEX_SICK_SYM='I101'"
+        )
+        assert result.iloc[0]['n'] == 1, "in-window record should appear in _t40_pre_index"
+
+
+class TestSmokingFormerCase:
+    def test_former_smoker_case(self, dm, vg):
+        """Q_SMK_NOW_YN=0, Q_SMK_YN=1 → 'Former' (과거 흡연자)"""
+        dm.execute(
+            "INSERT INTO GJ_QUEST VALUES ('P003','2016',1,0,0)"
+        )
+        vg.generate_health_behaviors()
+        df = dm.query("SELECT * FROM quest_final WHERE INDI_DSCM_NO='P003'")
+        assert df.iloc[0]['smoking_status'] == 'Former', \
+            f"expected 'Former', got {df.iloc[0]['smoking_status']!r}"
 
 
 # ---------------------------------------------------------------------------

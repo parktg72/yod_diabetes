@@ -4,7 +4,7 @@ variable_generator.py - 공변량 생성 모듈
 """
 
 import logging
-from config import DM_COMPLICATION_CODES, COMORBIDITY_CODES, CCI_CODES
+from config import DM_COMPLICATION_CODES, COMORBIDITY_CODES, CCI_CODES, STUDY_SETTINGS
 from memory_manager import mem_manager
 from utils import icd_like
 
@@ -103,13 +103,16 @@ class VariableGenerator:
 
     def _create_t40_filtered(self):
         """T40 사전 필터링 테이블 생성 — comorbidity/complication/CCI에서 재사용 (T40 1회 스캔)"""
-        self.dm.execute("""
+        lookback_years = int(STUDY_SETTINGS.get('LOOKBACK_YEARS', 1))
+        self.dm.execute(f"""
             CREATE OR REPLACE TABLE _t40_pre_index AS
             SELECT t40.INDI_DSCM_NO, t40.MCEX_SICK_SYM
             FROM T40 t40
             INNER JOIN analysis_data ad
                 ON t40.INDI_DSCM_NO = ad.INDI_DSCM_NO
                 AND t40.MDCARE_STRT_DT <= ad.index_date
+                AND t40.MDCARE_STRT_DT >= CAST(CAST(SUBSTR(ad.index_date,1,4) AS INT) - {lookback_years} AS VARCHAR)
+                    || SUBSTR(ad.index_date, 5)
         """)
 
     def _drop_t40_filtered(self):
