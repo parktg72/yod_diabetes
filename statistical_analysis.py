@@ -143,6 +143,7 @@ class StatisticalAnalyzer:
                 sampled_rows=len(self._cached_df),
                 seed=seed,
             )
+            gc.collect()
         else:
             self._cached_df = self.dm.query("SELECT * FROM final_analysis WHERE follow_up_days > 0")
             if self._cached_df.empty:

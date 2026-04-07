@@ -115,6 +115,9 @@ class ConnectionTab(QWidget):
     def test_hana(self):
         try:
             self._init_dm()
+            if self.ctx.dm.hana:
+                self.ctx.dm.hana.destroy()
+                self.ctx.dm.hana = None
             self.ctx.dm.connect_hana(self.hana_host.text(), int(self.hana_port.text()),
                                      self.hana_user.text(), self.hana_pass.text())
             QMessageBox.information(self, "결과", "HANA DB 연결 성공!")
