@@ -45,6 +45,10 @@ REM --- pip 업그레이드 ---
 echo [INFO] pip 업그레이드 중...
 python -m pip install --no-cache-dir --upgrade pip
 
+REM --- pip 업그레이드 후 잔류 임시 배포 정리 (~ip 등 손상된 .dist-info 제거) ---
+for /d %%i in ("venv\Lib\site-packages\~*") do rmdir /s /q "%%i" 2>nul
+for %%i in ("venv\Lib\site-packages\~*") do del /q "%%i" 2>nul
+
 REM --- 의존 패키지 설치 ---
 echo [INFO] 패키지 설치 중 (requirements.txt)...
 python -m pip install --no-cache-dir -r requirements.txt
