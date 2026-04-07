@@ -115,6 +115,10 @@ class StatisticalAnalyzer:
             )
 
             seed = int(STUDY_SETTINGS.get('SAMPLING_SEED', 42))
+            if not (0 <= seed <= 99):
+                raise ValueError(
+                    f"SAMPLING_SEED는 0-99 범위여야 합니다. 현재 값: {seed}"
+                )
             seed_float = seed / 100.0  # DuckDB setseed: float in [0, 1]
             self.dm.execute(f"SELECT setseed({seed_float})")
             logger.info("샘플링 전략: dm_total=%d, non_dm_budget=%d, max_rows=%d, seed=%d",
@@ -274,17 +278,32 @@ class StatisticalAnalyzer:
                 cph.fit(df_model, duration_col=T, event_col=E)
                 result_entry = {'summary': cph.summary, 'concordance': cph.concordance_index_}
                 # PH 가정 검정 (Schoenfeld residuals)
+                exposure_ph_violation = []
                 try:
                     ph_test = proportional_hazard_test(cph, df_model, time_transform='rank')
                     result_entry['ph_test'] = ph_test.summary
                     _ph_alpha = float(STUDY_SETTINGS.get('PH_ALPHA', 0.05))
                     violated = ph_test.summary[ph_test.summary['p'] < _ph_alpha]
                     if not violated.empty:
-                        logger.warning(f"Cox {mname}: PH 가정 위반 변수 — "
-                                     f"{', '.join(violated.index.tolist())}")
+                        violated_vars = violated.index.tolist()
+                        exposure_ph_violation = [v for v in violated_vars if v in exposure]
+                        non_exp = [v for v in violated_vars if v not in exposure]
+                        if non_exp:
+                            logger.warning(f"Cox {mname}: PH 가정 위반 변수(공변량) — "
+                                         f"{', '.join(non_exp)}")
                 except Exception as ph_e:
                     logger.info(f"PH 검정 생략 ({mname}): {ph_e}")
+
+                # I11: 노출변수 PH 위반은 분석 결과 신뢰성을 훼손 → RuntimeError
+                if exposure_ph_violation:
+                    raise RuntimeError(
+                        f"Cox {mname}({outcome}): 노출변수 PH 가정 위반 — "
+                        f"{', '.join(exposure_ph_violation)}. "
+                        f"층화 Cox 또는 시간-변환 공변량을 검토하세요."
+                    )
                 results[mname] = result_entry
+            except RuntimeError:
+                raise  # 노출변수 PH 위반 등 복구 불가 오류
             except InsufficientDataError as e:
                 logger.warning(f"Cox {mname} 데이터 부족 — 스킵: {e}")
             except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:

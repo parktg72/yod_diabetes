@@ -112,3 +112,79 @@ def test_psm_caliper_respects_study_settings():
     assert STUDY_SETTINGS['PH_ALPHA'] == 0.05
     assert STUDY_SETTINGS['PSM_CALIPER'] == 0.2
     assert STUDY_SETTINGS['PSM_SMD_THRESHOLD'] == 0.1
+
+
+def _make_cox_df(n=50):
+    """Cox 테스트용 최소 DataFrame 생성."""
+    return pd.DataFrame({
+        'exposure_group':      ['T1DM'] * (n // 2) + ['T2DM_OHA'] * (n // 2),
+        'is_t1dm':             [1] * (n // 2) + [0] * (n // 2),
+        'is_t2dm_oha':         [0] * (n // 2) + [1] * (n // 2),
+        'is_t2dm_insulin':     [0] * n,
+        'is_t2dm_nomed':       [0] * n,
+        'age_at_index':        [50.0] * n,
+        'male':                [1] * n,
+        'income_q':            [5] * n,
+        'comor_hypertension':  [0] * n,
+        'comor_dyslipidemia':  [0] * n,
+        'comor_depression':    [0] * n,
+        'comp_retinopathy':    [0] * n,
+        'comp_nephropathy':    [0] * n,
+        'comp_neuropathy':     [0] * n,
+        'comor_ischemic_stroke':   [0] * n,
+        'comor_hemorrhagic_stroke':[0] * n,
+        'comor_ihd':           [0] * n,
+        'comor_atrial_fib':    [0] * n,
+        'comor_heart_failure': [0] * n,
+        'comp_hypoglycemia':   [0] * n,
+        'follow_up_years':     [1.0] * n,
+        'dementia_event':      [1] * 15 + [0] * (n - 15),
+    })
+
+
+def test_run_cox_raises_runtime_error_when_exposure_ph_violated():
+    """I11: 노출변수가 PH 가정 위반 시 RuntimeError 발생."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+
+    # ph_test.summary 에서 is_t1dm 이 p<0.05 로 위반
+    ph_summary = pd.DataFrame({'p': [0.01, 0.5]}, index=['is_t1dm', 'age_at_index'])
+    ph_mock = MagicMock()
+    ph_mock.summary = ph_summary
+
+    with patch('statistical_analysis.STUDY_SETTINGS',
+               {'MIN_VALID_ROWS': 10, 'MIN_EVENTS': 5, 'SAMPLING_SEED': 42,
+                'PH_ALPHA': 0.05}):
+        with patch('statistical_analysis.CoxPHFitter') as mock_cls, \
+             patch('statistical_analysis.proportional_hazard_test', return_value=ph_mock):
+            mock_cls.return_value.fit.return_value = None
+            mock_cls.return_value.summary = pd.DataFrame()
+            mock_cls.return_value.concordance_index_ = 0.6
+            import pytest as _pytest
+            with _pytest.raises(RuntimeError, match="PH 가정 위반"):
+                analyzer.run_cox(df_prepared=df)
+
+
+def test_sampling_seed_out_of_range_raises():
+    """M3: SAMPLING_SEED 0-99 범위 초과 시 ValueError 발생."""
+    import pytest as _pytest
+    from statistical_analysis import StatisticalAnalyzer
+
+    mock_dm = MagicMock()
+    mock_dm.storage.get_row_count.return_value = 1000  # total > max_rows → 샘플링 분기
+    group_df = pd.DataFrame({'exposure_group': ['T1DM', 'NON_DM'], 'cnt': [300, 700]})
+    mock_dm.query.return_value = group_df
+
+    analyzer = StatisticalAnalyzer.__new__(StatisticalAnalyzer)
+    analyzer.dm = mock_dm
+    analyzer._cached_df = None
+    analyzer._sampling_info = None
+    analyzer.results = {}
+
+    with patch('statistical_analysis.STUDY_SETTINGS',
+               {'MIN_VALID_ROWS': 10, 'MIN_EVENTS': 5, 'SAMPLING_SEED': 100,
+                'PH_ALPHA': 0.05}):
+        with patch('statistical_analysis.mem_manager') as mock_mem:
+            mock_mem.get_safe_analysis_rows.return_value = 100  # 강제로 total > max_rows
+            with _pytest.raises(ValueError, match="SAMPLING_SEED"):
+                analyzer._load_data()
