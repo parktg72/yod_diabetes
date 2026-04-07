@@ -801,6 +801,12 @@ class MonthlyHanaExtractor:
         # Fix C1: MDCARE_STRT_YYYYMM 컬럼 타입 감지 → INTEGER면 숫자 비교
         col_type = self.hana._detect_column_type(self.schema, table_name, _MONTHLY_FILTER_COL)
         use_int_where = col_type is not None and 'INT' in col_type.upper()
+        if col_type is None:
+            logger.warning(
+                "%s: %s 컬럼 타입 감지 실패 — 문자열 비교로 폴백 "
+                "(HANA 연결 전 호출 시 정상)",
+                table_name, _MONTHLY_FILTER_COL
+            )
 
         for idx, yyyymm in enumerate(months, 1):
             parquet_path = cache_dir / f'{table_upper}_{yyyymm}.parquet'
@@ -855,12 +861,16 @@ class MonthlyHanaExtractor:
                         raise
 
             if writer is None:
-                # 빈 월: 이미 수집된 스키마로 0행 Parquet 저장 (schema_columns 없으면 무컬럼)
-                empty_df = (
-                    pd.DataFrame(columns=schema_columns)
-                    if schema_columns is not None
-                    else pd.DataFrame()
-                )
+                if schema_columns is None:
+                    # 스키마 미확정 상태의 0건 월: 파일 미생성, 병합 대상 제외
+                    # (0컬럼 Parquet을 병합하면 DuckDB union_by_name 오류 발생)
+                    logger.debug(
+                        "%s %s: 스키마 미확정 빈 월 — 병합 대상 제외",
+                        table_upper, yyyymm
+                    )
+                    continue
+                # 스키마 확정 후 0건 월: 올바른 컬럼 구조의 빈 Parquet 저장
+                empty_df = pd.DataFrame(columns=schema_columns)
                 empty_df.to_parquet(str(tmp_path), index=False)
 
             tmp_path.replace(parquet_path)

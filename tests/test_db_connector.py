@@ -600,6 +600,79 @@ class TestExtractAllMonthsFailFast:
         with pytest.raises(RuntimeError, match="0건"):
             extractor.extract_all_months('T20', 'T20')
 
+    def test_early_empty_months_excluded_from_merge(self, tmp_path):
+        """초기 0건 월(스키마 미확정)은 parquet_files에 포함되지 않아 DuckDB 병합 오류 방지."""
+        import config as cfg
+        # 2개월만 테스트 (201301 빈, 201302 데이터 있음)
+        orig_start = cfg.STUDY_SETTINGS['STUDY_START_YEAR']
+        orig_end = cfg.STUDY_SETTINGS['STUDY_END_YEAR']
+        try:
+            cfg.STUDY_SETTINGS['STUDY_START_YEAR'] = 2013
+            cfg.STUDY_SETTINGS['STUDY_END_YEAR'] = 2013
+
+            df_sample = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
+
+            def fake_fetch(table, schema, where_clause=None):
+                # 201301은 0건, 201302부터 데이터
+                if where_clause and '201302' in where_clause:
+                    yield df_sample
+
+            mock_hana = MagicMock()
+            mock_hana.fetch_table_chunked.side_effect = fake_fetch
+            mock_hana._detect_column_type.return_value = 'NVARCHAR'
+            mock_storage = MagicMock()
+            mock_storage.get_row_count.return_value = 1
+
+            extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+            extractor.extract_all_months('T20', 'T20')
+
+            # 201301 parquet은 생성되지 않아야 함 (0컬럼 병합 방지)
+            cache_dir = tmp_path / 'T20'
+            assert not (cache_dir / 'T20_201301.parquet').exists(), \
+                "스키마 미확정 빈 월은 parquet 파일 미생성"
+            # 201302 parquet은 생성되어야 함
+            assert (cache_dir / 'T20_201302.parquet').exists(), \
+                "데이터 있는 월은 parquet 생성"
+        finally:
+            cfg.STUDY_SETTINGS['STUDY_START_YEAR'] = orig_start
+            cfg.STUDY_SETTINGS['STUDY_END_YEAR'] = orig_end
+
+    def test_empty_month_after_schema_known_creates_parquet(self, tmp_path):
+        """스키마 확정 후 0건 월은 올바른 컬럼 구조의 빈 parquet 생성."""
+        import config as cfg
+        orig_start = cfg.STUDY_SETTINGS['STUDY_START_YEAR']
+        orig_end = cfg.STUDY_SETTINGS['STUDY_END_YEAR']
+        try:
+            cfg.STUDY_SETTINGS['STUDY_START_YEAR'] = 2013
+            cfg.STUDY_SETTINGS['STUDY_END_YEAR'] = 2013
+
+            df_sample = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
+
+            def fake_fetch(table, schema, where_clause=None):
+                # 201301만 데이터, 나머지 0건
+                if where_clause and '201301' in where_clause:
+                    yield df_sample
+
+            mock_hana = MagicMock()
+            mock_hana.fetch_table_chunked.side_effect = fake_fetch
+            mock_hana._detect_column_type.return_value = 'NVARCHAR'
+            mock_storage = MagicMock()
+            mock_storage.get_row_count.return_value = 1
+
+            extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+            extractor.extract_all_months('T20', 'T20')
+
+            cache_dir = tmp_path / 'T20'
+            parquet_202 = cache_dir / 'T20_201302.parquet'
+            assert parquet_202.exists(), "스키마 확정 후 빈 월은 parquet 생성"
+            df_empty = pd.read_parquet(str(parquet_202))
+            assert list(df_empty.columns) == ['INDI_DSCM_NO', 'CMN_KEY'], \
+                f"빈 parquet 컬럼 불일치: {list(df_empty.columns)}"
+            assert len(df_empty) == 0, "빈 월 parquet은 0행"
+        finally:
+            cfg.STUDY_SETTINGS['STUDY_START_YEAR'] = orig_start
+            cfg.STUDY_SETTINGS['STUDY_END_YEAR'] = orig_end
+
 
 class TestParquetWriterFinally:
     """Fix C7: ParquetWriter try/finally."""
