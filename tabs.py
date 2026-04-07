@@ -957,19 +957,22 @@ class AnalysisTab(QWidget):
             return run_post_analysis(self.ctx.dm, ar, self.ctx.results_dir, log=_log)
 
         from main_app import WorkerThread
-        self._post_worker = WorkerThread(do_post)  # GC 방지: 인스턴스 변수 유지
-        mw.worker = self._post_worker  # closeEvent cleanup + mw.worker 는 '현재 실행 중인 최신 워커' 관례
-        self._post_worker.progress.connect(self.log_signal.emit)
-        self._post_worker.progress.connect(lambda m: self.analysis_text.append(m))
-        self._post_worker.finished.connect(self._on_post_analysis)
-        self._post_worker.error.connect(mw._on_error)
-        self._post_worker.start()
+        try:
+            self._post_worker = WorkerThread(do_post)  # GC 방지: 인스턴스 변수 유지
+            mw.worker = self._post_worker  # closeEvent cleanup + mw.worker 는 '현재 실행 중인 최신 워커' 관례
+            self._post_worker.progress.connect(self.log_signal.emit)
+            self._post_worker.progress.connect(lambda m: self.analysis_text.append(m))
+            self._post_worker.finished.connect(self._on_post_analysis)
+            self._post_worker.error.connect(mw._on_error)
+            self._post_worker.start()
+        except Exception as e:
+            mw._on_error(f"시각화/내보내기 워커 시작 실패: {e}")
 
     def _on_post_analysis(self, data):
         mw = self.ctx.main_window
         mw.progress_bar.setVisible(False)
         mw._set_action_buttons_enabled(True)
-        result = data.get('result', {})
+        result = data.get('result') or {}
         for err in result.get('errors', []):
             self.log_signal.emit(err)
         self.log_signal.emit(f"분석 완료! 결과: {self.ctx.results_dir}")
