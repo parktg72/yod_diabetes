@@ -64,11 +64,12 @@ class StatisticalAnalyzer:
         "코호트 구성 단계를 확인하세요."
     )
 
-    def _load_data(self):
+    def _load_data(self, cb=None):
         """메모리 안전 데이터 로드 — 1회 로드 후 캐시 재사용"""
         if self._cached_df is not None:
             return self._cached_df, self._sampling_info
 
+        if cb: cb("분석 데이터 로딩 중...")
         min_valid = int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30))
         if min_valid <= 0:
             raise ValueError(f"MIN_VALID_ROWS 는 양의 정수여야 합니다: {min_valid}")
@@ -76,6 +77,7 @@ class StatisticalAnalyzer:
         total = self.dm.storage.get_row_count('final_analysis')
         if total > max_rows:
             logger.warning(f"분석 데이터 {total:,}건 > 안전 한도 {max_rows:,}건 → 층화 샘플링")
+            if cb: cb(f"층화 샘플링 적용 중... ({total:,}건 → {max_rows:,}건 목표)")
             # 각 노출군의 실제 비율에 비례하여 max_rows 배분
             group_counts_df = self.dm.query(
                 "SELECT exposure_group, COUNT(*) AS cnt FROM final_analysis "
@@ -155,6 +157,7 @@ class StatisticalAnalyzer:
 
         # dtype 최적화
         self._cached_df = mem_manager.optimize_dtypes(self._cached_df)
+        if cb: cb(f"데이터 로드 완료: {len(self._cached_df):,}건")
         logger.info(f"분석 데이터 로드: {len(self._cached_df):,}건, "
                    f"{self._cached_df.memory_usage(deep=True).sum() / 1024**2:.1f}MB")
         return self._cached_df, self._sampling_info
@@ -177,8 +180,9 @@ class StatisticalAnalyzer:
             self._cached_df = None
             gc.collect()
 
-    def _prepare(self, df):
+    def _prepare(self, df, cb=None):
         """공변량 전처리 — 캐시 원본 보호를 위해 1회 copy 후 파생변수 추가"""
+        if cb: cb("데이터 전처리 중...")
         prepared = df.copy()  # 캐시(_cached_df) 원본 변경 방지를 위해 copy 필요
 
         prepared['is_t1dm'] = (prepared['exposure_group'] == 'T1DM').astype('int8')
@@ -922,8 +926,8 @@ class StatisticalAnalyzer:
                      run_interaction=True, run_subgroup=True, run_sensitivity=True,
                      run_competing_risks=True):
         """선택된 분석만 실행 — 체크박스 상태를 그대로 반영"""
-        raw, info = self._load_data()
-        df_prepared = self._prepare(raw)
+        raw, info = self._load_data(cb=cb)
+        df_prepared = self._prepare(raw, cb=cb)
         logger.info(f"분석 데이터 준비 완료: {len(df_prepared):,}건, "
                    f"{df_prepared.memory_usage(deep=True).sum() / 1024**2:.1f}MB")
 
