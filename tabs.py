@@ -500,9 +500,9 @@ class DataLoadTab(QWidget):
         self.spin_enroll_end.setValue(STUDY_SETTINGS.get('ENROLLMENT_END', 2016))
         cl.addWidget(self.spin_enroll_end, 1, 3)
 
-        self.lbl_cohort_status = QLabel("코호트 ID: 미추출")
-        self.lbl_cohort_status.setStyleSheet("color: gray;")
-        cl.addWidget(self.lbl_cohort_status, 2, 0, 1, 3)
+        self.chk_resume_cohort = QCheckBox("기존 코호트 ID 캐시 재사용 — 진입기간 변경 시 해제")
+        self.chk_resume_cohort.setChecked(True)
+        cl.addWidget(self.chk_resume_cohort, 2, 0, 1, 3)
 
         self.btn_extract_cohort = QPushButton("코호트 ID 추출")
         self.btn_extract_cohort.setStyleSheet(
@@ -510,6 +510,10 @@ class DataLoadTab(QWidget):
         )
         self.btn_extract_cohort.clicked.connect(self.extract_cohort_ids)
         cl.addWidget(self.btn_extract_cohort, 2, 3)
+
+        self.lbl_cohort_status = QLabel("코호트 ID: 미추출")
+        self.lbl_cohort_status.setStyleSheet("color: gray;")
+        cl.addWidget(self.lbl_cohort_status, 3, 0, 1, 4)
 
         ly.addWidget(cg)
 
@@ -536,7 +540,7 @@ class DataLoadTab(QWidget):
         btn_cache.clicked.connect(self._browse_cache_dir)
         ml.addWidget(btn_cache, 1, 3)
 
-        self.chk_resume = QCheckBox("기존 캐시 재사용 — 소스 데이터 변경 시 해제하여 전체 재추출")
+        self.chk_resume = QCheckBox("기존 월별 Parquet 캐시 재사용 — 소스 데이터 변경 시 해제")
         self.chk_resume.setChecked(True)
         ml.addWidget(self.chk_resume, 2, 0, 1, 4)
 
@@ -642,7 +646,7 @@ class DataLoadTab(QWidget):
         hana_port = ct.hana_port.text()
         hana_user = ct.hana_user.text()
         hana_pass = ct.hana_pass.text()
-        force_extract = not self.chk_resume.isChecked()
+        force_extract = not self.chk_resume_cohort.isChecked()
         dm = self.ctx.dm
 
         self.lbl_cohort_status.setText("코호트 ID 추출 중...")
