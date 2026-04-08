@@ -74,6 +74,11 @@ class Visualizer:
         self.out.mkdir(parents=True, exist_ok=True)
 
     def plot_km(self, df, outcome='dementia_event', title='KM Survival', filename='km.png'):
+        required = {'exposure_group', 'follow_up_years', outcome}
+        missing = required - set(df.columns)
+        if missing:
+            logger.warning(f"plot_km: 필수 컬럼 없음 {missing} — 그래프 생성 생략")
+            return None
         fig, ax = plt.subplots(figsize=(12, 8))
         plotted = False
         for g in ['NON_DM', 'T2DM_NOMED', 'T2DM_OHA', 'T2DM_INSULIN', 'T1DM']:
@@ -147,7 +152,7 @@ class Visualizer:
             return None
         fig, ax = plt.subplots(figsize=(10, max(5, len(balance) * 0.5)))
         vs = list(balance.keys())
-        smds = [balance[v]['smd'] for v in vs]
+        smds = [balance[v].get('smd', 0) if isinstance(balance[v], dict) else 0 for v in vs]
         colors = ['#2ECC71' if s < 0.1 else '#E74C3C' for s in smds]
         ax.barh(range(len(vs)), smds, color=colors, height=0.6)
         ax.axvline(x=0.1, color='red', linestyle='--', label='Threshold (0.1)')
@@ -175,6 +180,9 @@ class Visualizer:
             if group not in cif_data:
                 continue
             d = cif_data[group]
+            if 'times' not in d or 'cif_event' not in d:
+                logger.warning(f"plot_cif: {group} 데이터 구조 불완전 (times/cif_event 없음) — 해당 그룹 생략")
+                continue
             ax1.step(d['times'], d['cif_event'], where='post',
                      color=COLORS.get(group, '#333'), linewidth=2,
                      label=LABELS.get(group, group))
@@ -190,6 +198,9 @@ class Visualizer:
             if group not in cif_data:
                 continue
             d = cif_data[group]
+            if 'times' not in d or 'cif_competing' not in d:
+                logger.warning(f"plot_cif: {group} 데이터 구조 불완전 (times/cif_competing 없음) — 해당 그룹 생략")
+                continue
             ax2.step(d['times'], d['cif_competing'], where='post',
                      color=COLORS.get(group, '#333'), linewidth=2, linestyle='--',
                      label=LABELS.get(group, group))
