@@ -50,7 +50,7 @@ python -m pip install --no-cache-dir --upgrade pip
 call :cleanup_dist
 
 REM --- 의존 패키지 설치 ---
-echo [INFO] 패키지 설치 중 (requirements.txt)...
+echo [INFO] requirements.txt 패키지 설치 중...
 python -m pip install --no-cache-dir -r requirements.txt
 if errorlevel 1 (
     echo [ERROR] requirements.txt 패키지 설치 실패
@@ -60,7 +60,7 @@ call :cleanup_dist
 
 REM --- SAP HANA 드라이버 선택 설치 (없어도 빌드 계속 진행) ---
 if exist requirements-hana.txt (
-    echo [INFO] SAP HANA 드라이버 설치 중 (requirements-hana.txt)...
+    echo [INFO] requirements-hana.txt SAP HANA 드라이버 설치 중...
     python -m pip install --no-cache-dir -r requirements-hana.txt
     if errorlevel 1 (
         echo [WARN] hdbcli 설치 실패 - HANA DB 연결 기능 없이 빌드 진행합니다.
