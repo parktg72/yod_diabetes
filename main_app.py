@@ -132,7 +132,8 @@ class MainWindow(QMainWindow):
 
     def _set_action_buttons_enabled(self, enabled):
         """장시간 작업 중 액션 버튼 비활성화/활성화"""
-        for attr_name, tab in [('btn_load', self.data_load_tab),
+        for attr_name, tab in [('btn_extract_cohort', self.data_load_tab),
+                                ('btn_load', self.data_load_tab),
                                 ('btn_merge', self.data_load_tab),
                                 ('btn_cohort', self.cohort_tab),
                                 ('btn_analysis', self.analysis_tab)]:
