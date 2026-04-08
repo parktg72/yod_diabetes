@@ -32,6 +32,9 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
 
     # KM 곡선
     try:
+        from config import STUDY_SETTINGS as _ss
+        _seed_float = int(_ss.get('SAMPLING_SEED', 42)) / 100.0
+        dm.execute(f"SELECT setseed({_seed_float})")
         km_sample = dm.query("""
             SELECT exposure_group, follow_up_years, dementia_event, ad_event, vad_event
             FROM (

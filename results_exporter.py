@@ -13,19 +13,6 @@ class ResultsExporter:
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
-    def _add_sampling_header(self, df, sampling_info):
-        """데이터프레임 상단에 샘플링 정보 행 추가 (단순 concat 방식, 내부 호환용)"""
-        if sampling_info is None or not sampling_info.applied:
-            return df
-
-        info_row = pd.DataFrame([[
-            f"[샘플링] {sampling_info.label}",
-            f"분석일: {date.today()}",
-            "", ""
-        ]], columns=df.columns[:4] if len(df.columns) >= 4 else df.columns)
-
-        return pd.concat([info_row, df], ignore_index=True)
-
     def _write_df_with_sampling_header(self, writer, df, sheet_name, sampling_info):
         """샘플링 정보가 Excel 첫 번째 행에 오도록 시트를 작성한다.
 
@@ -45,12 +32,19 @@ class ResultsExporter:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     def export_table1(self, df, filename='table1.xlsx', sampling_info=None):
-        path = self.output_dir / filename
-        with pd.ExcelWriter(path, engine='openpyxl') as writer:
-            self._write_df_with_sampling_header(
-                writer, df.copy(), 'Table 1', sampling_info
-            )
-        return str(path)
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            logger.warning("Table 1 내보내기 생략: 데이터 없음")
+            return None
+        try:
+            path = self.output_dir / filename
+            with pd.ExcelWriter(path, engine='openpyxl') as writer:
+                self._write_df_with_sampling_header(
+                    writer, df.copy(), 'Table 1', sampling_info
+                )
+            return str(path)
+        except Exception as e:
+            logger.warning("Table 1 내보내기 실패: %s", e)
+            return None
 
     def export_cox_results(self, cox_results, filename='cox_regression.xlsx', sampling_info=None):
         # 저장할 summary가 하나도 없으면 빈 워크북 생성 시도 차단 (openpyxl은 시트 없는 저장 불허)
@@ -245,7 +239,9 @@ class ResultsExporter:
     def export_all(self, results, prefix='', sampling_info=None):
         exported = []
         if 'table1' in results:
-            exported.append(self.export_table1(results['table1'], f'{prefix}table1.xlsx', sampling_info))
+            path = self.export_table1(results['table1'], f'{prefix}table1.xlsx', sampling_info)
+            if path:
+                exported.append(path)
         for key in results:
             if key.startswith('cox_'):
                 path = self.export_cox_results(results[key], f'{prefix}{key}.xlsx', sampling_info)

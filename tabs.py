@@ -836,8 +836,8 @@ class DataLoadTab(QWidget):
         def on_done(data):
             mw.progress_bar.setVisible(False)
             mw._set_action_buttons_enabled(True)
-            nr = data.get('result', {}).get('nr', 0)
-            nq = data.get('result', {}).get('nq', 0)
+            nr = (data.get('result') or {}).get('nr', 0)
+            nq = (data.get('result') or {}).get('nq', 0)
             self.log_signal.emit(f"검진결과 통합: {format_number(nr)}건, 문진 통합: {format_number(nq)}건")
             QMessageBox.information(self, "완료", f"GJ_RESULT: {format_number(nr)}건\nGJ_QUEST: {format_number(nq)}건")
 
@@ -1051,7 +1051,7 @@ class AnalysisTab(QWidget):
         if self.ctx.dm is None:
             return True
         if not self.ctx.dm.storage.table_exists('final_analysis'):
-            return False  # 테이블 없음 — start_analysis에서 경고 표시
+            return True  # 테이블 없음 — start_analysis에서 별도 경고 표시 후 처리
         try:
             total = self.ctx.dm.storage.get_row_count('final_analysis')
         except Exception as e:

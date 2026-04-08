@@ -140,3 +140,31 @@ class TestExportSensitivityResults:
         exp = ResultsExporter(str(tmp_path))
         exported = exp.export_all({'interaction': {'skipped': True, 'reason': 'x'}})
         assert not any('sensitivity' in str(p) for p in exported if p)
+
+
+class TestExportAllTable1Guard:
+    """export_all: table1 None 반환 시 exported 목록에 포함되지 않아야 한다."""
+
+    def test_table1_none_not_in_exported(self, tmp_path):
+        """export_table1이 None 반환(빈 df) 시 exported 목록에 추가되지 않는다."""
+        exp = ResultsExporter(str(tmp_path))
+        results = {'table1': None}
+        exported = exp.export_all(results)
+        assert all(p is not None for p in exported), \
+            f"None이 exported에 포함됨: {exported}"
+        assert len(exported) == 0, f"table1=None이면 exported 빈 목록이어야 함: {exported}"
+
+    def test_table1_empty_df_not_in_exported(self, tmp_path):
+        """export_table1이 빈 DataFrame 시 exported 목록에 추가되지 않는다."""
+        exp = ResultsExporter(str(tmp_path))
+        results = {'table1': pd.DataFrame()}
+        exported = exp.export_all(results)
+        assert len(exported) == 0, f"빈 df table1은 exported에 없어야 함: {exported}"
+
+    def test_table1_valid_df_in_exported(self, tmp_path):
+        """정상 DataFrame이면 exported에 포함된다."""
+        exp = ResultsExporter(str(tmp_path))
+        results = {'table1': pd.DataFrame({'col': ['A'], 'val': [1]})}
+        exported = exp.export_all(results)
+        assert len(exported) == 1
+        assert 'table1' in exported[0]

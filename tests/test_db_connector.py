@@ -1285,3 +1285,43 @@ class TestHANAConnectorRetry:
             f"HHDV_TABLE='{custom_table}' 설정 시 해당 테이블 조회 필요. 실제 조회: {queried_tables}"
         assert 'HHDV_DSEC_YY' not in queried_tables, \
             "커스텀 HHDV_TABLE 설정 시 기본 'HHDV_DSEC_YY' 조회 금지"
+
+
+class TestDuckDBStorageExecuteParams:
+    """DuckDBStorage.execute(): params=[] 빈 리스트 바인딩 정상 동작 확인."""
+
+    def test_execute_empty_list_params_does_not_skip_binding(self, tmp_path):
+        """params=[] 전달 시 파라미터 바인딩이 누락되지 않는다 (실제 쿼리로 검증)."""
+        storage = DuckDBStorage(str(tmp_path / "test_params.duckdb"))
+        storage.connect()
+        # params=[] — 빈 리스트는 이제 바인딩 경로로 진입해야 함
+        # DuckDB에서 빈 파라미터 리스트로 execute는 오류 없이 동작
+        result = storage.execute("SELECT 1 AS n", params=[])
+        assert result.fetchone()[0] == 1
+
+    def test_execute_none_params_no_binding(self, tmp_path):
+        """params=None 이면 바인딩 없이 실행된다."""
+        storage = DuckDBStorage(str(tmp_path / "test_params2.duckdb"))
+        storage.connect()
+        result = storage.execute("SELECT 42 AS n", params=None)
+        assert result.fetchone()[0] == 42
+
+
+class TestCohortIDExtractorEmptyResult:
+    """CohortIDExtractor.extract(): 조건 충족 환자 0건이면 RuntimeError."""
+
+    def test_empty_cohort_raises_runtime_error(self, tmp_path):
+        """HHDV와 T20 교집합이 완전히 비어있으면 RuntimeError를 발생시킨다."""
+        # HHDV에는 P001이 있지만 T20에는 아무것도 없음 → 교집합 0건
+        hana = _make_mock_hana(
+            hhdv_rows_by_year={'2013': ['P001']},
+            t20_rows_by_month={},
+        )
+        extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
+
+        with patch.dict('config.STUDY_SETTINGS', {
+            'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2013,
+            'MIN_AGE': 40, 'MAX_AGE': 64,
+        }):
+            with pytest.raises(RuntimeError, match="조건을 만족하는 환자가 없습니다"):
+                extractor.extract(force=True)

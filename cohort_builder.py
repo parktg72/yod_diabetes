@@ -228,9 +228,10 @@ class CohortBuilder:
             )
             SELECT COALESCE(o.INDI_DSCM_NO, i.INDI_DSCM_NO) AS INDI_DSCM_NO,
                    COALESCE(o.dm_type, i.dm_type) AS dm_type,
-                   LEAST(COALESCE(o.first_dt, i.first_dt), COALESCE(i.first_dt, o.first_dt)) AS first_dm_date
+                   MIN(LEAST(COALESCE(o.first_dt, i.first_dt), COALESCE(i.first_dt, o.first_dt))) AS first_dm_date
             FROM outpt o FULL OUTER JOIN inpt i ON o.INDI_DSCM_NO=i.INDI_DSCM_NO AND o.dm_type=i.dm_type
             WHERE COALESCE(o.n,0) >= {mo} OR COALESCE(i.n,0) >= {mi}
+            GROUP BY COALESCE(o.INDI_DSCM_NO, i.INDI_DSCM_NO), COALESCE(o.dm_type, i.dm_type)
         """)
 
         # 임시 테이블 정리

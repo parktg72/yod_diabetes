@@ -61,10 +61,10 @@ class VariableGenerator:
                             WHEN gj.G1E_BMI<25 THEN 'OW' ELSE 'OB' END AS bmi_cat
                 FROM analysis_data ad
                 INNER JOIN GJ_RESULT gj ON ad.INDI_DSCM_NO=gj.INDI_DSCM_NO
-                -- HC_DT(YYYYMMDD)와 index_date(YYYYMMDD) 직접 비교: 동년 index 이전 검진도 포함
-                WHERE gj.HC_DT <= ad.index_date
+                -- HC_DT(YYYYMMDD)와 index_date(YYYYMMDD) VARCHAR 비교: 타입 불일치 방지를 위해 명시적 CAST
+                WHERE CAST(gj.HC_DT AS VARCHAR) <= CAST(ad.index_date AS VARCHAR)
                 QUALIFY ROW_NUMBER() OVER (PARTITION BY ad.INDI_DSCM_NO
-                    ORDER BY gj.HC_DT DESC) = 1
+                    ORDER BY CAST(gj.HC_DT AS VARCHAR) DESC) = 1
             """)
         else:
             self.dm.execute("""
@@ -96,7 +96,8 @@ class VariableGenerator:
                             ELSE 'Heavy' END AS drinking_status
                 FROM analysis_data ad
                 INNER JOIN GJ_QUEST gq ON ad.INDI_DSCM_NO=gq.INDI_DSCM_NO
-                -- GJ_QUEST에는 HC_DT 없음 → 연도 단위 비교 유지 (동년 index 이전 문진 제외)
+                -- GJ_QUEST에는 일자(HC_DT) 없고 연도(HC_BZ_YYYY)만 있음
+                -- index 당해연도 문진은 실시 시점 불확실 → 보수적으로 제외 (GJ_RESULT와 기준 상이는 의도된 설계)
                 WHERE CAST(gq.HC_BZ_YYYY AS INT) < CAST(SUBSTR(ad.index_date,1,4) AS INT)
                 QUALIFY ROW_NUMBER() OVER (PARTITION BY ad.INDI_DSCM_NO
                     ORDER BY CAST(gq.HC_BZ_YYYY AS INT) DESC) = 1

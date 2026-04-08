@@ -263,7 +263,7 @@ class DuckDBStorage:
     def execute(self, query, params=None):
         if not self.conn:
             self.connect()
-        return self.conn.execute(query, params) if params else self.conn.execute(query)
+        return self.conn.execute(query, params) if params is not None else self.conn.execute(query)
 
     def execute_df(self, query, params=None):
         result = self.execute(query, params)
@@ -1062,6 +1062,8 @@ class CohortIDExtractor:
         min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
         max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
         hhdv_table = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSEC_YY')
+        std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
+        byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
 
         months = self._enrollment_month_range()
         total = len(months)
@@ -1092,8 +1094,8 @@ class CohortIDExtractor:
             # ── 연령 조건: hhdv_table (연도별 1회 조회 후 캐시) ──────────────────
             if year not in age_ids_by_year:
                 age_where = (
-                    f"STD_YYYY = '{year}' AND "
-                    f"(CAST(STD_YYYY AS INT) - CAST(BYEAR AS INT)) "
+                    f"{std_yyyy_col} = '{year}' AND "
+                    f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
                     f"BETWEEN {min_age} AND {max_age}"
                 )
                 year_ids: set = set()

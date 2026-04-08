@@ -139,7 +139,7 @@ class StatisticalAnalyzer:
             """)
             self._sampling_info = SamplingInfo(
                 applied=True,
-                total_rows=total,
+                total_rows=valid_total,  # follow_up_days>0 유효 행 기준 (Excel 헤더 비율 정확도)
                 sampled_rows=len(self._cached_df),
                 seed=seed,
             )
@@ -306,7 +306,7 @@ class StatisticalAnalyzer:
                     continue
                 results[mname] = result_entry
             except RuntimeError:
-                raise  # 노출변수 PH 위반 등 복구 불가 오류
+                raise  # CoxPHFitter 내부 수렴 실패 등 복구 불가 오류 — 상위 _safe_run이 처리
             except InsufficientDataError as e:
                 logger.warning(f"Cox {mname} 데이터 부족 — 스킵: {e}")
                 failed_models[mname] = f"데이터 부족: {e}"
@@ -484,12 +484,13 @@ class StatisticalAnalyzer:
                         c = CoxPHFitter()
                         c.fit(d2, duration_col='follow_up_years', event_col=oc)
                         psm_cox[oc] = {'summary': c.summary}
+                    except InsufficientDataError as e:
+                        logger.warning("PSM Cox (%s) 데이터 부족 스킵: %s", oc, e)
                     except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:
-                        logger.exception(f"분석 오류 (PSM Cox {oc})")
-                        logger.warning(f"PSM Cox ({oc}) 실패: {e}")
+                        logger.warning("PSM Cox (%s) 분석 실패: %s", oc, e)
                     except Exception as e:
-                        logger.exception(f"예기치 않은 오류 (PSM Cox {oc})")
-                        logger.warning(f"PSM Cox ({oc}) 실패: {e}")
+                        logger.exception("PSM Cox (%s) 예기치 않은 오류", oc)
+                        logger.warning("PSM Cox (%s) 실패: %s", oc, e)
 
         self.results['psm'] = {
             'n_treated': len(mt_list), 'n_control': len(mc_list),
@@ -768,12 +769,17 @@ class StatisticalAnalyzer:
                 }
 
             # NON_DM CIF
-            non_dm_mask = (
-                (df_cr['is_t1dm'] == 0 if 'is_t1dm' in df_cr.columns else pd.Series(True, index=df_cr.index)) &
-                (df_cr['is_t2dm_oha'] == 0 if 'is_t2dm_oha' in df_cr.columns else pd.Series(True, index=df_cr.index)) &
-                (df_cr['is_t2dm_insulin'] == 0 if 'is_t2dm_insulin' in df_cr.columns else pd.Series(True, index=df_cr.index)) &
-                (df_cr['is_t2dm_nomed'] == 0 if 'is_t2dm_nomed' in df_cr.columns else pd.Series(True, index=df_cr.index))
-            )
+            _exposure_cols = ['is_t1dm', 'is_t2dm_oha', 'is_t2dm_insulin', 'is_t2dm_nomed']
+            if not all(c in df_cr.columns for c in _exposure_cols):
+                logger.warning("run_competing_risks: NON_DM CIF 계산 스킵 — 노출군 컬럼 누락")
+                non_dm_mask = pd.Series(False, index=df_cr.index)
+            else:
+                non_dm_mask = (
+                    (df_cr['is_t1dm'] == 0) &
+                    (df_cr['is_t2dm_oha'] == 0) &
+                    (df_cr['is_t2dm_insulin'] == 0) &
+                    (df_cr['is_t2dm_nomed'] == 0)
+                )
             if (non_dm_mask.sum() >= _min_cr and
                     (event_type[non_dm_mask.values] == 1).sum() >= _min_cr_events):
                 times_g = df_cr.loc[non_dm_mask, T].values.astype(float)

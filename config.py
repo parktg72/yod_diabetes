@@ -207,7 +207,9 @@ STUDY_SETTINGS = {
     'PH_ALPHA': 0.05,             # Cox PH 가정 검정 유의수준
     'PSM_CALIPER': 0.2,           # PSM caliper = PSM_CALIPER × pooled logit(PS) SD
     'PSM_SMD_THRESHOLD': 0.1,     # PSM 균형 판정 SMD 임계값
-    'HHDV_TABLE': 'HHDV_DSEC_YY', # 연령 정보 테이블 (코호트 ID 추출 시 사용)
+    'HHDV_TABLE': 'HHDV_DSEC_YY',    # 연령 정보 테이블 (코호트 ID 추출 시 사용)
+    'HHDV_STD_YYYY_COL': 'STD_YYYY', # HHDV 자격 연도 컬럼명
+    'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
 }
 
 DUCKDB_SETTINGS = {
