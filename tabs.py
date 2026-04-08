@@ -898,9 +898,14 @@ class CohortTab(QWidget):
         STUDY_SETTINGS['MIN_DM_CLAIMS_INPATIENT'] = self.spin_inpt.value()
         STUDY_SETTINGS['PSM_RATIO'] = self.spin_psm.value()
 
-        mw.progress_bar.setVisible(True)
-
         dm = self.ctx.dm
+        if dm is None or not dm.storage.table_exists('T20'):
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "안내",
+                "T20 테이블이 없습니다.\n먼저 '4. 데이터 로드' 탭에서 데이터를 로드하세요.")
+            return
+
+        mw.progress_bar.setVisible(True)
 
         def do_cohort(progress_callback=None):
             builder = CohortBuilder(dm)
@@ -1007,10 +1012,12 @@ class AnalysisTab(QWidget):
         """
         if self.ctx.dm is None:
             return True
+        if not self.ctx.dm.storage.table_exists('final_analysis'):
+            return False  # 테이블 없음 — start_analysis에서 경고 표시
         try:
             total = self.ctx.dm.storage.get_row_count('final_analysis')
         except Exception:
-            return True  # 테이블 없음 — 분석 실행 시 실패로 처리
+            return False  # 조회 실패 — 안전하게 취소
 
         from memory_manager import mem_manager as _mm
         max_rows = _mm.get_safe_analysis_rows()
@@ -1034,7 +1041,14 @@ class AnalysisTab(QWidget):
             return
         self._ensure_dm()
 
-        # 샘플링 사전 확인 — 분석 시작 전, Cancel 시 워커 미시작
+        # 사전 확인: final_analysis 테이블 존재 여부 + 샘플링 필요 여부
+        dm_check = self.ctx.dm
+        if dm_check is not None and not dm_check.storage.table_exists('final_analysis'):
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.warning(self, "안내",
+                "분석 대상 테이블(final_analysis)이 없습니다.\n"
+                "먼저 '5. 코호트 구축' 탭에서 코호트를 구축하세요.")
+            return
         if not self._confirm_sampling_if_needed():
             return
 
