@@ -75,6 +75,7 @@ class Visualizer:
 
     def plot_km(self, df, outcome='dementia_event', title='KM Survival', filename='km.png'):
         fig, ax = plt.subplots(figsize=(12, 8))
+        plotted = False
         for g in ['NON_DM', 'T2DM_NOMED', 'T2DM_OHA', 'T2DM_INSULIN', 'T1DM']:
             gd = df[df['exposure_group'] == g]
             if len(gd) < 10:
@@ -87,6 +88,11 @@ class Visualizer:
             kmf = KaplanMeierFitter()
             kmf.fit(T[m], E[m], label=LABELS.get(g, g))
             kmf.plot_survival_function(ax=ax, color=COLORS.get(g, '#333'), linewidth=2, ci_show=True, ci_alpha=0.1)
+            plotted = True
+        if not plotted:
+            plt.close(fig)
+            logger.warning("plot_km: 유효 그룹 없음 (최소 10건 미달) — 그래프 생성 생략")
+            return None
         ax.set_xlabel('Follow-up (years)', fontsize=14)
         ax.set_ylabel('Survival Probability', fontsize=14)
         ax.set_title(title, fontsize=16, fontweight='bold')
@@ -158,6 +164,9 @@ class Visualizer:
 
     def plot_cif(self, cif_data, title='Cumulative Incidence', filename='cif.png'):
         """누적발생률(CIF) 곡선 — 경쟁위험 분석 결과 시각화"""
+        if not cif_data:
+            logger.warning("plot_cif: cif_data가 비어 있음 — 그래프 생성 생략")
+            return None
         fig, axes = plt.subplots(1, 2, figsize=(18, 8))
 
         # 좌: 관심사건(치매) CIF
