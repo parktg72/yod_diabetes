@@ -1262,7 +1262,10 @@ class ResultsTab(QWidget):
             viz = Visualizer(str(self.ctx.results_dir))
             p = viz.plot_km(df)
             del df; import gc; gc.collect()
-            self.log_signal.emit(f"KM: {p}")
+            if p:
+                self.log_signal.emit(f"KM 곡선 저장: {p}")
+            else:
+                self.log_signal.emit("KM 곡선 생성 생략: 유효 그룹 없음 (최소 10건 미달)")
             if sys.platform == 'win32' and p:
                 rp = Path(p).resolve()
                 if rp.is_relative_to(self.ctx.results_dir.resolve()):
