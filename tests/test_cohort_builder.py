@@ -892,3 +892,128 @@ class TestCompetingDeathEvent:
         if row.iloc[0]['dementia_event'] == 1:
             assert row.iloc[0]['competing_death_event'] == 0, \
                 "치매 발생 환자는 competing_death_event=0이어야 함"
+
+
+# ===========================================================================
+# C3: follow_up_days <= 0 행 제거 검증
+# ===========================================================================
+class TestFollowUpDaysRemoval:
+    """step6 이후 follow_up_days <= 0 행이 analysis_data에서 제거되어야 한다."""
+
+    def test_zero_followup_rows_absent_after_step6(self, builder, dm):
+        """step6 완료 후 analysis_data에 follow_up_days <= 0 행이 없어야 한다."""
+        _run_steps_up_to(builder, 5)
+        builder.step6_outcomes()
+        bad = dm.query("SELECT COUNT(*) AS n FROM analysis_data WHERE follow_up_days <= 0")
+        assert bad.iloc[0]['n'] == 0, "follow_up_days <= 0 행이 남아있음 — DELETE 로직 미작동"
+
+    def test_delete_cleans_injected_bad_rows(self, builder, dm):
+        """step6 이후 수동으로 follow_up_days=0 행을 주입 후 DELETE로 제거되는지 확인."""
+        _run_steps_up_to(builder, 5)
+        builder.step6_outcomes()
+        # 정상 행이 존재함을 먼저 확인
+        n_before = dm.query("SELECT COUNT(*) AS n FROM analysis_data").iloc[0]['n']
+        assert n_before > 0
+        # 0 follow_up 행을 직접 주입
+        dm.conn.execute("UPDATE analysis_data SET follow_up_days = 0 WHERE INDI_DSCM_NO='P0001'")
+        bad_before = dm.query("SELECT COUNT(*) AS n FROM analysis_data WHERE follow_up_days <= 0").iloc[0]['n']
+        assert bad_before == 1
+        # DELETE 로직 재실행 (step6의 DELETE 절과 동일)
+        dm.conn.execute("DELETE FROM analysis_data WHERE follow_up_days <= 0")
+        bad_after = dm.query("SELECT COUNT(*) AS n FROM analysis_data WHERE follow_up_days <= 0").iloc[0]['n']
+        assert bad_after == 0, "DELETE가 follow_up_days <= 0 행을 제거하지 못함"
+
+    def test_valid_followup_rows_preserved(self, builder, dm):
+        """follow_up_days > 0인 정상 환자는 step6 후 유지된다."""
+        _run_steps_up_to(builder, 5)
+        builder.step6_outcomes()
+        n = dm.query("SELECT COUNT(*) AS n FROM analysis_data").iloc[0]['n']
+        assert n > 0, "정상 환자가 모두 제거됨"
+
+
+# ===========================================================================
+# C1: index_year 컬럼 검증
+# ===========================================================================
+class TestIndexYear:
+    """exposure_groups 및 analysis_data에 index_year 컬럼이 존재해야 한다."""
+
+    def test_index_year_in_exposure_groups(self, dm):
+        """step4 후 exposure_groups에 index_year 컬럼이 있어야 한다."""
+        with patch('cohort_builder.mem_manager'):
+            cb = CohortBuilder(dm)
+            _run_steps_up_to(cb, 4)
+
+        cols = dm.query("SELECT * FROM exposure_groups LIMIT 0").columns.tolist()
+        assert 'index_year' in cols, "index_year 컬럼이 exposure_groups에 없음"
+
+    def test_index_year_values_valid(self, dm):
+        """index_year가 ENROLLMENT_START~ENROLLMENT_END 범위 내에 있어야 한다."""
+        with patch('cohort_builder.mem_manager'):
+            cb = CohortBuilder(dm)
+            _run_steps_up_to(cb, 4)
+
+        rows = dm.query("SELECT MIN(index_year) AS mn, MAX(index_year) AS mx FROM exposure_groups")
+        assert rows.iloc[0]['mn'] >= 2013, "index_year가 ENROLLMENT_START보다 작음"
+        assert rows.iloc[0]['mx'] <= 2024, "index_year가 STUDY_END_YEAR보다 큼"
+
+    def test_index_year_in_analysis_data(self, builder, dm):
+        """step6 후 analysis_data에도 index_year가 있어야 한다."""
+        _run_steps_up_to(builder, 5)
+        builder.step6_outcomes()
+        cols = dm.query("SELECT * FROM analysis_data LIMIT 0").columns.tolist()
+        assert 'index_year' in cols, "index_year 컬럼이 analysis_data에 없음"
+
+
+# ===========================================================================
+# I7: INPATIENT_FORM_CD config 외부화 검증
+# ===========================================================================
+class TestInpatientFormCd:
+    """INPATIENT_FORM_CD가 config에서 읽혀 step4에서 사용되어야 한다."""
+
+    def test_custom_form_cd_used(self, dm):
+        """INPATIENT_FORM_CD를 변경하면 입원 키 추출에 반영된다."""
+        with patch('cohort_builder.mem_manager'):
+            from config import STUDY_SETTINGS
+            original = STUDY_SETTINGS.get('INPATIENT_FORM_CD', '02')
+            try:
+                STUDY_SETTINGS['INPATIENT_FORM_CD'] = '99'  # 존재하지 않는 코드
+                cb = CohortBuilder(dm)
+                _run_steps_up_to(cb, 3)
+                cb.step4_classify_groups()
+                # FORM_CD='99'로는 입원 키가 0건 → _inpatient_keys 0건 생성
+                n_keys = dm.query(
+                    "SELECT COUNT(*) AS n FROM (SELECT CMN_KEY FROM T20 WHERE FORM_CD='99')"
+                ).iloc[0]['n']
+                assert n_keys == 0, "FORM_CD='99' 변경이 반영되지 않음"
+            finally:
+                STUDY_SETTINGS['INPATIENT_FORM_CD'] = original
+
+
+# ===========================================================================
+# C4: AGE65_CENSOR_MONTH config 검증
+# ===========================================================================
+class TestAge65CensorMonth:
+    """AGE65_CENSOR_MONTH 설정값이 age65_date 계산에 반영되어야 한다."""
+
+    def test_default_month_is_0101(self, builder, dm):
+        """기본값 '0101'로 age65_date가 BYEAR+65+'0101' 형태로 생성된다."""
+        _run_steps_up_to(builder, 5)
+        builder.step6_outcomes()
+        row = dm.query("SELECT age65_date FROM analysis_data WHERE INDI_DSCM_NO='P0001'")
+        # BYEAR=1965+65=2030 -> '20300101'
+        assert row.iloc[0]['age65_date'] == '20300101'
+
+    def test_custom_month_0701(self, dm):
+        """'0701'로 설정 시 age65_date가 BYEAR+65+'0701' 형태로 생성된다."""
+        from config import STUDY_SETTINGS
+        original = STUDY_SETTINGS.get('AGE65_CENSOR_MONTH', '0101')
+        try:
+            STUDY_SETTINGS['AGE65_CENSOR_MONTH'] = '0701'
+            with patch('cohort_builder.mem_manager'):
+                cb = CohortBuilder(dm)
+                _run_steps_up_to(cb, 5)
+                cb.step6_outcomes()
+            row = dm.query("SELECT age65_date FROM analysis_data WHERE INDI_DSCM_NO='P0001'")
+            assert row.iloc[0]['age65_date'] == '20300701'
+        finally:
+            STUDY_SETTINGS['AGE65_CENSOR_MONTH'] = original

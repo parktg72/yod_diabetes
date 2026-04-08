@@ -210,9 +210,10 @@ class CohortBuilder:
         mi = int(self.settings.get('MIN_DM_CLAIMS_INPATIENT', 1))
 
         # 입원 CMN_KEY 사전 추출 (T20 반복 서브쿼리 방지)
-        self.dm.execute("""
+        inpt_form = self.settings.get('INPATIENT_FORM_CD', '02')
+        self.dm.execute(f"""
             CREATE OR REPLACE TABLE _inpatient_keys AS
-            SELECT DISTINCT CMN_KEY FROM T20 WHERE FORM_CD='02'
+            SELECT DISTINCT CMN_KEY FROM T20 WHERE FORM_CD='{inpt_form}'
         """)
 
         self.dm.execute(f"""
@@ -228,7 +229,14 @@ class CohortBuilder:
             )
             SELECT COALESCE(o.INDI_DSCM_NO, i.INDI_DSCM_NO) AS INDI_DSCM_NO,
                    COALESCE(o.dm_type, i.dm_type) AS dm_type,
-                   MIN(LEAST(COALESCE(o.first_dt, i.first_dt), COALESCE(i.first_dt, o.first_dt))) AS first_dm_date
+                   -- first_dm_date: 외래·입원 모두 있으면 더 이른 날짜, 한쪽만 있으면 그 값
+                   -- LEAST(NULL, x) = NULL(표준 SQL)이므로 명시적 CASE로 안전하게 처리
+                   -- GROUP BY 집계 컨텍스트이므로 MIN()으로 래핑
+                   MIN(CASE
+                     WHEN o.first_dt IS NOT NULL AND i.first_dt IS NOT NULL
+                          THEN LEAST(o.first_dt, i.first_dt)
+                     ELSE COALESCE(o.first_dt, i.first_dt)
+                   END) AS first_dm_date
             FROM outpt o FULL OUTER JOIN inpt i ON o.INDI_DSCM_NO=i.INDI_DSCM_NO AND o.dm_type=i.dm_type
             WHERE COALESCE(o.n,0) >= {mo} OR COALESCE(i.n,0) >= {mi}
             GROUP BY COALESCE(o.INDI_DSCM_NO, i.INDI_DSCM_NO), COALESCE(o.dm_type, i.dm_type)
@@ -273,12 +281,20 @@ class CohortBuilder:
                    END AS exposure_group,
                    -- NON_DM은 전역 진입연도 대신 개인별 첫 관찰연도(first_year)의 1월 1일을 index_date로 사용
                    -- (전역 시작일을 쓰면 실제 관찰 시작 전 기간이 추적기간에 포함되어 편향 발생)
+                   -- 주의: DM군의 index_date는 진단일이라 NON_DM보다 늦을 수 있음.
+                   -- 이 calendar time 차이를 보정하기 위해 index_year를 Cox 공변량에 포함함.
                    COALESCE(
                        t1.first_dm_date,
                        t2.first_dm_date,
                        CAST(bp.first_year AS VARCHAR) || '0101'
                    ) AS index_date,
-                   COALESCE(t1.first_dm_date, t2.first_dm_date) AS first_dm_date
+                   COALESCE(t1.first_dm_date, t2.first_dm_date) AS first_dm_date,
+                   -- index_year: Cox/PSM에서 calendar time 보정용 (NON_DM vs DM 관찰시작 불일치 보정)
+                   CAST(SUBSTR(COALESCE(
+                       t1.first_dm_date,
+                       t2.first_dm_date,
+                       CAST(bp.first_year AS VARCHAR) || '0101'
+                   ), 1, 4) AS INT) AS index_year
             FROM base_population bp
             LEFT JOIN dm_patients t1 ON bp.INDI_DSCM_NO=t1.INDI_DSCM_NO AND t1.dm_type='T1DM'
             LEFT JOIN dm_patients t2 ON bp.INDI_DSCM_NO=t2.INDI_DSCM_NO AND t2.dm_type='T2DM'
@@ -401,8 +417,9 @@ class CohortBuilder:
                 GROUP BY INDI_DSCM_NO
             """)
 
-        # age65_date: 생년만 알고 생년월일이 없으므로 BYEAR+65의 1월 1일로 근사
-        # (실제 생일이 1월 이후인 환자는 최대 ~1년 조기 censoring 가능 — 행정DB 한계)
+        # age65_date: 생년만 알고 생년월일이 없으므로 BYEAR+65의 AGE65_CENSOR_MONTH로 근사
+        # 기본='0101': 최대 ~11개월 조기 censoring 발생 (행정DB 한계).
+        # 민감도 분석 시 AGE65_CENSOR_MONTH='0701'로 설정하면 평균 편향 최소화 (약 ±6개월)
         # 사망일자: DEATH 테이블(DTH_ASSMD_DT) 우선, 없으면 JK.HHDT_DEATH fallback
         has_death_table = self.dm.storage.table_exists('DEATH')
 
@@ -436,7 +453,7 @@ class CohortBuilder:
             -- censor_date를 먼저 산출하여 이벤트 플래그 판정에 재사용
             base AS (
                 SELECT sc.*,
-                       CAST((CAST(sc.BYEAR AS INT) + {yod}) || '0101' AS VARCHAR) AS age65_date,
+                       CAST((CAST(sc.BYEAR AS INT) + {yod}) || '{self.settings.get("AGE65_CENSOR_MONTH", "0101")}' AS VARCHAR) AS age65_date,
                        oa.event_date AS dementia_date,
                        ad.event_date AS ad_date,
                        vd.event_date AS vad_date,
@@ -486,12 +503,16 @@ class CohortBuilder:
             UPDATE analysis_data SET follow_up_years = follow_up_days / 365.25;
         """)
 
-        # follow_up_days <= 0 건수 경고
+        # follow_up_days <= 0: censor_date <= index_date — 추적 불가능한 행 제거
         bad_fu = self.dm.query("SELECT COUNT(*) AS n FROM analysis_data WHERE follow_up_days <= 0")
         n_bad = int(bad_fu.iloc[0, 0]) if len(bad_fu) > 0 else 0
         if n_bad > 0:
-            logger.warning(f"follow_up_days <= 0: {n_bad:,}건 (index_date >= censor_date). "
-                          f"분석 시 자동 제외됩니다.")
+            self.dm.execute("DELETE FROM analysis_data WHERE follow_up_days <= 0")
+            logger.warning(
+                f"follow_up_days <= 0: {n_bad:,}건 제거 (index_date >= censor_date — "
+                f"자격 소멸·사망이 index_date와 동일하거나 이전인 케이스). "
+                f"cohort 기준일 또는 censor 조건을 확인하세요."
+            )
 
         events = self.dm.query("""
             SELECT exposure_group, COUNT(*) n, SUM(dementia_event) dem, SUM(ad_event) ad, SUM(vad_event) vad,

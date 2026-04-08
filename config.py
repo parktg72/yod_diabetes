@@ -205,11 +205,16 @@ STUDY_SETTINGS = {
     'MIN_EVENTS': 10,             # Cox 분석 최소 이벤트 수 (EPV heuristic)
     'MIN_SUBGROUP_EVENTS': 5,     # 서브그룹/Fine-Gray 분석 최소 이벤트 수
     'PH_ALPHA': 0.05,             # Cox PH 가정 검정 유의수준
+    'PH_BONFERRONI': True,        # PH 검정 Bonferroni 다중검증 보정 (변수 수로 나눔)
     'PSM_CALIPER': 0.2,           # PSM caliper = PSM_CALIPER × pooled logit(PS) SD
     'PSM_SMD_THRESHOLD': 0.1,     # PSM 균형 판정 SMD 임계값
     'HHDV_TABLE': 'HHDV_DSEC_YY',    # 연령 정보 테이블 (코호트 ID 추출 시 사용)
     'HHDV_STD_YYYY_COL': 'STD_YYYY', # HHDV 자격 연도 컬럼명
     'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
+    'INPATIENT_FORM_CD': '02',        # T20 입원 진료명세서 구분코드 (외래='01', 입원='02')
+    'AGE65_CENSOR_MONTH': '0101',     # 65세 censoring 기준월일 (MMDD). 기본='0101'(1월1일).
+                                      # 생년월일 미보유로 인해 최대 ~11개월 조기 censoring 발생.
+                                      # 민감도 분석: '0701'(7월1일)로 변경하면 평균 편향 최소화.
 }
 
 DUCKDB_SETTINGS = {

@@ -132,7 +132,8 @@ class VariableGenerator:
         selects = []
         for cname, codes in COMORBIDITY_CODES.items():
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
-            selects.append(f"MAX(CASE WHEN {cond} THEN 1 ELSE 0 END) AS comor_{cname.lower()}")
+            # COALESCE: T40 미매칭 환자(기록 없음)는 합병증 없음(0)으로 처리
+            selects.append(f"COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS comor_{cname.lower()}")
 
         # _t40_pre_index 재사용 (T40 1회 스캔으로 3개 변수 그룹 생성)
         self.dm.execute(f"""
@@ -148,7 +149,8 @@ class VariableGenerator:
         selects = []
         for cname, codes in DM_COMPLICATION_CODES.items():
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
-            selects.append(f"MAX(CASE WHEN {cond} THEN 1 ELSE 0 END) AS comp_{cname.lower()}")
+            # COALESCE: T40 미매칭 환자(기록 없음)는 합병증 없음(0)으로 처리
+            selects.append(f"COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS comp_{cname.lower()}")
 
         # _t40_pre_index 재사용
         self.dm.execute(f"""
@@ -191,7 +193,8 @@ class VariableGenerator:
         selects = []
         for cname, (codes, w) in CCI_CODES.items():
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
-            selects.append(f"{w} * MAX(CASE WHEN {cond} THEN 1 ELSE 0 END) AS cci_{cname.lower()}")
+            # COALESCE: T40 미매칭 환자는 해당 CCI 항목 0점으로 처리
+            selects.append(f"{w} * COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS cci_{cname.lower()}")
 
         sums = ' + '.join(f"COALESCE(cci_{c.lower()},0)" for c in CCI_CODES)
 

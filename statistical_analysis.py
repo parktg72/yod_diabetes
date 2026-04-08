@@ -196,7 +196,7 @@ class StatisticalAnalyzer:
         prepared['is_t2dm_nomed'] = (prepared['exposure_group'] == 'T2DM_NOMED').astype('int8')
         prepared['male'] = (prepared['SEX_TYPE'] == '1').astype('int8')
 
-        for col in ['age_at_index', 'income_quintile', 'bmi', 'cci_score',
+        for col in ['age_at_index', 'index_year', 'income_quintile', 'bmi', 'cci_score',
                      'dm_duration_years', 'follow_up_years']:
             if col in prepared.columns:
                 prepared[col] = pd.to_numeric(prepared[col], errors='coerce')
@@ -258,11 +258,14 @@ class StatisticalAnalyzer:
         failed_models = {}  # {model_name: error_message}
         exposure = ['is_t1dm', 'is_t2dm_oha', 'is_t2dm_insulin', 'is_t2dm_nomed']
 
+        # index_year: NON_DM(first_year 기준)과 DM(진단일 기준) 간 calendar time 차이 보정.
+        # NON_DM은 2013-01-01부터, DM은 실제 진단연도부터 추적 시작 → 관찰 시작 시점 불일치를
+        # 공변량으로 조정하여 time-period confounding을 최소화.
         models = {
-            'model1_age_sex': exposure + ['age_at_index', 'male'],
-            'model2_socio': exposure + ['age_at_index', 'male', 'income_q',
+            'model1_age_sex': exposure + ['age_at_index', 'male', 'index_year'],
+            'model2_socio': exposure + ['age_at_index', 'male', 'index_year', 'income_q',
                              'comor_hypertension', 'comor_dyslipidemia', 'comor_depression'],
-            'model3_full': exposure + ['age_at_index', 'male', 'income_q',
+            'model3_full': exposure + ['age_at_index', 'male', 'index_year', 'income_q',
                             'comor_hypertension', 'comor_dyslipidemia', 'comor_depression',
                             'comp_retinopathy', 'comp_nephropathy', 'comp_neuropathy',
                             'comor_ischemic_stroke', 'comor_hemorrhagic_stroke',
@@ -285,6 +288,10 @@ class StatisticalAnalyzer:
                     ph_test = proportional_hazard_test(cph, df_model, time_transform='rank')
                     result_entry['ph_test'] = ph_test.summary
                     _ph_alpha = float(STUDY_SETTINGS.get('PH_ALPHA', 0.05))
+                    # Bonferroni 보정: 검정 변수 수로 나눔 (다중검증 1종오류 제어)
+                    n_ph_vars = len(ph_test.summary)
+                    if STUDY_SETTINGS.get('PH_BONFERRONI', True) and n_ph_vars > 1:
+                        _ph_alpha = _ph_alpha / n_ph_vars
                     violated = ph_test.summary[ph_test.summary['p'] < _ph_alpha]
                     if not violated.empty:
                         violated_vars = violated.index.tolist()
@@ -292,7 +299,8 @@ class StatisticalAnalyzer:
                         non_exp = [v for v in violated_vars if v not in exposure]
                         if non_exp:
                             logger.warning(f"Cox {mname}: PH 가정 위반 변수(공변량) — "
-                                         f"{', '.join(non_exp)}")
+                                         f"{', '.join(non_exp)}"
+                                         f" (Bonferroni α={_ph_alpha:.4f})")
                 except Exception as ph_e:
                     logger.info(f"PH 검정 생략 ({mname}): {ph_e}")
 
@@ -370,7 +378,8 @@ class StatisticalAnalyzer:
         ].copy()
         df_dm['is_t1dm'] = (df_dm['exposure_group'] == 'T1DM').astype('int8')
 
-        ps_vars = ['age_at_index', 'male', 'income_q', 'comor_hypertension',
+        # index_year: T1DM vs T2DM의 진단 연도(calendar time) 매칭 — 연도별 DM 유형 분포 차이 보정
+        ps_vars = ['age_at_index', 'male', 'index_year', 'income_q', 'comor_hypertension',
                     'comor_dyslipidemia', 'dm_duration_years']
         ps_vars = [c for c in ps_vars if c in df_dm.columns]
         df_ps = df_dm[ps_vars + ['is_t1dm']].dropna()
