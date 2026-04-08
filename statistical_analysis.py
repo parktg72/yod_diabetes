@@ -986,37 +986,49 @@ class StatisticalAnalyzer:
                        f"torch CUDA: {gpu_info['torch_cuda']}")
             if cb: cb("GPU 가속 모드로 분석을 실행합니다.")
 
+        step_errors = {}  # {step_name: error_message}
+
+        def _safe_run(step_name, fn):
+            try:
+                fn()
+                mem_manager.cleanup_after_step(step_name)
+            except (InsufficientDataError, RuntimeError) as e:
+                step_errors[step_name] = str(e)
+                logger.warning("분석 단계 스킵 (%s): %s", step_name, e)
+                if cb: cb(f"[경고] {step_name} 스킵: {e}")
+            except Exception as e:
+                step_errors[step_name] = str(e)
+                logger.exception("분석 단계 오류 (%s)", step_name)
+                if cb: cb(f"[오류] {step_name}: {e}")
+
         # Table 1은 항상 생성
-        self.generate_table1(cb=cb, df_prepared=df_prepared)
-        mem_manager.cleanup_after_step('table1')
+        _safe_run('table1', lambda: self.generate_table1(cb=cb, df_prepared=df_prepared))
 
         if run_cox:
             for oc in ['dementia_event', 'ad_event', 'vad_event']:
-                self.run_cox(oc, cb=cb, df_prepared=df_prepared)
-                mem_manager.cleanup_after_step(f'cox_{oc}')
+                _safe_run(f'cox_{oc}', lambda o=oc: self.run_cox(o, cb=cb, df_prepared=df_prepared))
 
         if run_psm:
-            self.run_psm(cb=cb, df_prepared=df_prepared)
-            mem_manager.cleanup_after_step('psm')
+            _safe_run('psm', lambda: self.run_psm(cb=cb, df_prepared=df_prepared))
 
         if run_interaction:
-            self.run_interaction(cb=cb, df_prepared=df_prepared)
-            mem_manager.cleanup_after_step('interaction')
+            _safe_run('interaction', lambda: self.run_interaction(cb=cb, df_prepared=df_prepared))
 
         if run_subgroup:
-            self.run_subgroup(cb=cb, df_prepared=df_prepared)
-            mem_manager.cleanup_after_step('subgroup')
+            _safe_run('subgroup', lambda: self.run_subgroup(cb=cb, df_prepared=df_prepared))
 
         if run_competing_risks:
-            self.run_competing_risks(cb=cb, df_prepared=df_prepared)
-            mem_manager.cleanup_after_step('competing_risks')
+            _safe_run('competing_risks', lambda: self.run_competing_risks(cb=cb, df_prepared=df_prepared))
 
         del df_prepared
         gc.collect()
 
         if run_sensitivity:
-            self.run_sensitivity(cb=cb)
-            mem_manager.cleanup_after_step('sensitivity')
+            _safe_run('sensitivity', lambda: self.run_sensitivity(cb=cb))
+
+        if step_errors:
+            self.results['step_errors'] = step_errors
+            logger.warning("분석 단계 오류 요약: %s", step_errors)
 
         self.results['sampling_info'] = info
         # tabs.py 기존 호환성: _sampling_note 문자열 유지
