@@ -878,11 +878,13 @@ class StatisticalAnalyzer:
                                           'desc': '치매진단 + 항치매약 동반처방 (T30+T60)'}
             del r
         except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:
-            logger.exception("분석 오류 (민감도-항치매약)")
-            logger.warning(f"민감도(항치매약): {e}")
+            logger.warning("민감도(항치매약) 쿼리 실패: %s", e)
+            sens['dementia_with_drug'] = {'n': None, 'desc': f'쿼리 실패: {e}'}
+            if cb: cb(f"[경고] 민감도(항치매약) 쿼리 실패: {e}")
         except Exception as e:
             logger.exception("예기치 않은 오류 (민감도-항치매약)")
-            logger.warning(f"민감도(항치매약): {e}")
+            sens['dementia_with_drug'] = {'n': None, 'desc': f'오류: {e}'}
+            if cb: cb(f"[오류] 민감도(항치매약): {e}")
 
         sens['fine_gray'] = {
             'implemented': True,

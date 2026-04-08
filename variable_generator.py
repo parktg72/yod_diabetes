@@ -232,25 +232,47 @@ class VariableGenerator:
         return self.dm.storage.get_row_count('final_analysis')
 
     def generate_all(self, cb=None):
-        self.generate_demographics(cb)
-        mem_manager.cleanup_after_step('demographics')
-        self.generate_health_behaviors(cb)
-        mem_manager.cleanup_after_step('health_behaviors')
+        step_errors = {}
+
+        def _safe_step(name, fn):
+            try:
+                fn()
+            except Exception as e:
+                step_errors[name] = str(e)
+                logger.exception("변수 생성 단계 오류 (%s)", name)
+                if cb: cb(f"[경고] {name} 변수 생성 실패, 계속 진행: {e}")
+            finally:
+                mem_manager.cleanup_after_step(name)
+
+        _safe_step('demographics', lambda: self.generate_demographics(cb))
+        _safe_step('health_behaviors', lambda: self.generate_health_behaviors(cb))
 
         # T40 사전 필터링 1회 생성 → comorbidity/complication/CCI에서 재사용 (3회 스캔→1회)
-        self._create_t40_filtered()
-        self.generate_comorbidities(cb)
-        mem_manager.cleanup_after_step('comorbidities')
-        self.generate_dm_complications(cb)
-        mem_manager.cleanup_after_step('complications')
-        self.generate_dm_duration(cb)
-        mem_manager.cleanup_after_step('duration')
-        self.generate_cci(cb)
-        self._drop_t40_filtered()
-        mem_manager.cleanup_after_step('cci')
+        try:
+            self._create_t40_filtered()
+        except Exception as e:
+            logger.warning("T40 사전 필터링 실패: %s", e)
+            if cb: cb(f"[경고] T40 필터링 실패: {e}")
+
+        _safe_step('comorbidities', lambda: self.generate_comorbidities(cb))
+        _safe_step('complications', lambda: self.generate_dm_complications(cb))
+        _safe_step('duration', lambda: self.generate_dm_duration(cb))
+
+        try:
+            self.generate_cci(cb)
+        except Exception as e:
+            step_errors['cci'] = str(e)
+            logger.exception("변수 생성 단계 오류 (cci)")
+            if cb: cb(f"[경고] cci 변수 생성 실패: {e}")
+        finally:
+            self._drop_t40_filtered()
+            mem_manager.cleanup_after_step('cci')
 
         n = self.merge_all_variables(cb)
         mem_manager.cleanup_after_step('merge')
         if cb:
-            cb("모든 변수 생성 완료!")
+            if step_errors:
+                cb(f"변수 생성 완료 (일부 실패: {', '.join(step_errors)})")
+            else:
+                cb("모든 변수 생성 완료!")
         return n

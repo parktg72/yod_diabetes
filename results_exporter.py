@@ -54,7 +54,7 @@ class ResultsExporter:
 
     def export_cox_results(self, cox_results, filename='cox_regression.xlsx', sampling_info=None):
         # 저장할 summary가 하나도 없으면 빈 워크북 생성 시도 차단 (openpyxl은 시트 없는 저장 불허)
-        summaries = {k: v for k, v in cox_results.items() if 'summary' in v}
+        summaries = {k: v for k, v in cox_results.items() if isinstance(v, dict) and 'summary' in v}
         if not summaries:
             logger.warning(f"Cox 결과 내보내기 생략: 저장할 모델 요약 없음 ({filename})")
             return None
@@ -144,7 +144,7 @@ class ResultsExporter:
             # CIF summary (이벤트/경쟁위험/검열 건수)
             rows = []
             for group, cif in data.get('cif_by_group', {}).items():
-                if cif['cif_event']:
+                if cif.get('cif_event') and cif.get('cif_competing'):
                     rows.append({
                         'Group': group,
                         'Final_CIF_event': round(cif['cif_event'][-1], 6),

@@ -217,6 +217,40 @@ DUCKDB_SETTINGS = {
     'HANA_CACHE_DIR': None,  # None → _BASE_DIR / 'hana_cache'
 }
 
+
+def _validate_study_settings():
+    """STUDY_SETTINGS 값의 범위 검증. 잘못된 값이 있으면 ValueError를 발생시킨다."""
+    s = STUDY_SETTINGS
+    errors = []
+
+    # 정수 양수 필수
+    for key in ('MIN_VALID_ROWS', 'MIN_EVENTS', 'MIN_SUBGROUP_EVENTS',
+                'MIN_DM_CLAIMS_OUTPATIENT', 'MIN_DM_CLAIMS_INPATIENT',
+                'WASHOUT_YEARS', 'LOOKBACK_YEARS', 'PSM_RATIO', 'INCOME_DECILES'):
+        val = s.get(key)
+        if not isinstance(val, int) or val <= 0:
+            errors.append(f"{key}={val!r} — 1 이상의 정수여야 합니다")
+
+    # 0 이상의 실수
+    for key in ('PSM_CALIPER', 'PSM_SMD_THRESHOLD', 'PH_ALPHA'):
+        val = s.get(key)
+        if not isinstance(val, (int, float)) or val < 0:
+            errors.append(f"{key}={val!r} — 0 이상의 실수여야 합니다")
+
+    # 연령 범위
+    if s['MIN_AGE'] >= s['MAX_AGE']:
+        errors.append(f"MIN_AGE({s['MIN_AGE']}) >= MAX_AGE({s['MAX_AGE']})")
+
+    # 연도 범위
+    if s['STUDY_START_YEAR'] > s['STUDY_END_YEAR']:
+        errors.append(f"STUDY_START_YEAR({s['STUDY_START_YEAR']}) > STUDY_END_YEAR({s['STUDY_END_YEAR']})")
+
+    if errors:
+        raise ValueError("STUDY_SETTINGS 오류:\n  " + "\n  ".join(errors))
+
+
+_validate_study_settings()
+
 # ============================================================
 # 메모리 / GPU / 청크 설정
 # ============================================================
