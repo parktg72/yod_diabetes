@@ -147,7 +147,7 @@ class CohortBuilder:
             INNER JOIN base_population bp ON t40.INDI_DSCM_NO = bp.INDI_DSCM_NO
             WHERE ({t1c} OR {t2c})
               AND CAST(SUBSTR(t40.MDCARE_STRT_DT, 1, 4) AS INTEGER) >= bp.first_year
-              AND t40.INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM prevalent_dm)
+              AND NOT EXISTS (SELECT 1 FROM prevalent_dm pd WHERE pd.INDI_DSCM_NO = t40.INDI_DSCM_NO)
         """)
 
         self.dm.execute(f"""
@@ -158,7 +158,7 @@ class CohortBuilder:
             INNER JOIN base_population bp ON t20.INDI_DSCM_NO = bp.INDI_DSCM_NO
             WHERE ({t1s} OR {t2s})
               AND CAST(SUBSTR(t20.MDCARE_STRT_DT, 1, 4) AS INTEGER) >= bp.first_year
-              AND t20.INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM prevalent_dm)
+              AND NOT EXISTS (SELECT 1 FROM prevalent_dm pd WHERE pd.INDI_DSCM_NO = t20.INDI_DSCM_NO)
         """)
         return self.dm.storage.get_row_count('dm_claims')
 
@@ -253,11 +253,10 @@ class CohortBuilder:
             FROM dm_medications m
             INNER JOIN dm_patients dp ON m.INDI_DSCM_NO = dp.INDI_DSCM_NO
             WHERE m.rx_date >= dp.first_dm_date
-              AND m.rx_date <= CAST(
-                  STRFTIME(
-                      CAST(SUBSTR(dp.first_dm_date,1,4)||'-'||SUBSTR(dp.first_dm_date,5,2)||'-'||SUBSTR(dp.first_dm_date,7,2) AS DATE)
-                      + INTERVAL {_lookback_days} DAYS,
-                  '%Y%m%d') AS VARCHAR)
+              AND m.rx_date <= REPLACE(CAST(
+                      (CAST(SUBSTR(dp.first_dm_date,1,4)||'-'||SUBSTR(dp.first_dm_date,5,2)||'-'||SUBSTR(dp.first_dm_date,7,2) AS DATE)
+                      + INTERVAL '{_lookback_days}' DAY)::DATE
+                  AS VARCHAR), '-', '')
             GROUP BY m.INDI_DSCM_NO
         """)
 
@@ -283,7 +282,7 @@ class CohortBuilder:
             LEFT JOIN dm_patients t1 ON bp.INDI_DSCM_NO=t1.INDI_DSCM_NO AND t1.dm_type='T1DM'
             LEFT JOIN dm_patients t2 ON bp.INDI_DSCM_NO=t2.INDI_DSCM_NO AND t2.dm_type='T2DM'
             LEFT JOIN med_pattern mp ON bp.INDI_DSCM_NO=mp.INDI_DSCM_NO
-            WHERE bp.INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM dual_dm)
+            WHERE NOT EXISTS (SELECT 1 FROM dual_dm dd WHERE dd.INDI_DSCM_NO = bp.INDI_DSCM_NO)
         """)
 
         result = self.dm.query("SELECT exposure_group, COUNT(*) AS n FROM exposure_groups GROUP BY exposure_group ORDER BY 1")
@@ -345,8 +344,8 @@ class CohortBuilder:
         self.dm.execute("""
             CREATE OR REPLACE TABLE study_cohort AS
             SELECT * FROM exposure_groups
-            WHERE INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM excl_dementia_dx)
-              AND INDI_DSCM_NO NOT IN (SELECT INDI_DSCM_NO FROM excl_dementia_drug)
+            WHERE NOT EXISTS (SELECT 1 FROM excl_dementia_dx dx WHERE dx.INDI_DSCM_NO = exposure_groups.INDI_DSCM_NO)
+              AND NOT EXISTS (SELECT 1 FROM excl_dementia_drug dr WHERE dr.INDI_DSCM_NO = exposure_groups.INDI_DSCM_NO)
         """)
         n = self.dm.storage.get_row_count('study_cohort')
         e1 = self.dm.storage.get_row_count('excl_dementia_dx')
@@ -466,10 +465,11 @@ class CohortBuilder:
                              AND death_date <= censor_date
                              AND death_date > index_date
                         THEN 1 ELSE 0 END AS death_event,
-                   -- 경쟁위험: 치매 미발생 상태에서 사망 또는 탈퇴
+                   -- 경쟁위험: 치매 미발생 + 관찰기간 내 실제 사망 (탈퇴/검열 제외)
                    CASE WHEN (dementia_date IS NULL OR dementia_date > censor_date)
-                             AND censor_date < '{ey}1231'
-                             AND censor_date < age65_date
+                             AND death_date IS NOT NULL
+                             AND death_date <= censor_date
+                             AND death_date > index_date
                         THEN 1 ELSE 0 END AS competing_death_event
             FROM base
         """)

@@ -29,7 +29,14 @@ class VariableGenerator:
                    jk.GAIBJA_TYPE AS insurance_type,
                    jk.RVSN_ADDR_CD AS region_code
             FROM analysis_data ad
-            LEFT JOIN JK jk ON ad.INDI_DSCM_NO=jk.INDI_DSCM_NO
+            LEFT JOIN (
+                SELECT INDI_DSCM_NO, STD_YYYY, SES05, GAIBJA_TYPE, RVSN_ADDR_CD
+                FROM JK
+                QUALIFY ROW_NUMBER() OVER (
+                    PARTITION BY INDI_DSCM_NO, STD_YYYY
+                    ORDER BY GAIBJA_TYPE
+                ) = 1
+            ) jk ON ad.INDI_DSCM_NO = jk.INDI_DSCM_NO
                 AND jk.STD_YYYY = SUBSTR(ad.index_date,1,4)
         """)
 
@@ -111,7 +118,7 @@ class VariableGenerator:
             INNER JOIN analysis_data ad
                 ON t40.INDI_DSCM_NO = ad.INDI_DSCM_NO
                 AND t40.MDCARE_STRT_DT <= ad.index_date
-                AND t40.MDCARE_STRT_DT >= CAST(CAST(SUBSTR(ad.index_date,1,4) AS INT) - {lookback_years} AS VARCHAR)
+                AND t40.MDCARE_STRT_DT >= LPAD(CAST(CAST(SUBSTR(ad.index_date,1,4) AS INT) - {lookback_years} AS VARCHAR), 4, '0')
                     || SUBSTR(ad.index_date, 5)
         """)
 

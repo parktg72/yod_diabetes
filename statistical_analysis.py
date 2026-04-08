@@ -843,7 +843,11 @@ class StatisticalAnalyzer:
                 'n_censored': int((event_type == 0).sum()),
             }
 
-            del df_cr, df_fg, event_type
+            del df_cr, event_type
+            try:
+                del df_fg
+            except NameError:
+                pass
             gc.collect()
 
         results['_method_warning'] = (

@@ -206,6 +206,9 @@ def _widen_decimal_columns(storage, table_name):
             scale = int(row['numeric_scale']) if row['numeric_scale'] is not None else 0
         except (TypeError, ValueError):
             continue
+        if scale < 0 or scale > 38:
+            logger.warning(f"비정상적인 scale 값({scale}) 무시: {table_name}.{row['column_name']}")
+            continue
         if prec >= DUCKDB_WIDE_DECIMAL_PRECISION:
             continue  # 이미 충분히 넓음
         safe_prec = DUCKDB_WIDE_DECIMAL_PRECISION
@@ -276,7 +279,7 @@ class DuckDBStorage:
     def get_row_count(self, table_name):
         _validate_table_name(table_name)
         if self.table_exists(table_name):
-            return self.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            return self.execute(f"SELECT COUNT(*) FROM {_quote_identifier(table_name)}").fetchone()[0]
         return 0
 
     def drop_table(self, table_name):

@@ -1077,6 +1077,38 @@ class TestCohortIDExtractor:
         assert result == frozenset(['P999'])
         hana.fetch_table_chunked.assert_not_called()
 
+    def test_hhdv_year_failure_skips_year_and_continues(self, tmp_path):
+        """HHDV 특정 연도 조회 실패 시 해당 연도만 건너뛰고 다른 연도는 계속된다."""
+        hana = MagicMock(spec=HANAConnector)
+        hana._detect_column_type.return_value = 'NVARCHAR'
+
+        call_count = {'n': 0}
+
+        def fake_fetch(table_name, schema, columns=None, where_clause=None, chunk_size=None):
+            if table_name == 'HHDV_DSEC_YY':
+                call_count['n'] += 1
+                import re as _re
+                m = _re.search(r"STD_YYYY\s*=\s*'(\d{4})'", where_clause or '')
+                year = m.group(1) if m else None
+                if year == '2013':
+                    raise RuntimeError("HHDV 2013 조회 실패 (네트워크)")
+                if year == '2014':
+                    yield pd.DataFrame({'INDI_DSCM_NO': ['P001', 'P002']})
+            elif table_name == 'T20':
+                yield pd.DataFrame({'INDI_DSCM_NO': ['P001']})
+
+        hana.fetch_table_chunked.side_effect = fake_fetch
+        extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
+
+        with patch.dict('config.STUDY_SETTINGS', {
+            'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2014,
+            'MIN_AGE': 40, 'MAX_AGE': 64,
+        }):
+            result = extractor.extract(force=True)
+
+        # 2013 실패해도 2014 결과(P001)는 포함되어야 함
+        assert 'P001' in result, f"2014 연도 결과가 포함되어야 함: {result}"
+
 
 # ===========================================================================
 # HANAConnector.connect 재시도 테스트

@@ -3,7 +3,7 @@ tabs.py - Tab widget classes extracted from MainWindow
 Each tab is a self-contained QWidget subclass sharing state via AppContext.
 """
 
-import sys, os, logging, traceback
+import sys, os, re, logging, traceback
 import pandas as pd
 import duckdb
 from pathlib import Path
@@ -171,7 +171,8 @@ class MemoryTab(QWidget):
         rl.addWidget(QLabel("DuckDB 메모리 (GB):"), 1, 0)
         self.spin_duckdb_mem = QSpinBox()
         self.spin_duckdb_mem.setRange(1, 64)
-        self.spin_duckdb_mem.setValue(int(DUCKDB_SETTINGS['MEMORY_LIMIT'].replace('GB', '')))
+        _mem_val = re.sub(r'[^\d]', '', DUCKDB_SETTINGS['MEMORY_LIMIT'].upper().split('GB')[0]) or '4'
+        self.spin_duckdb_mem.setValue(max(1, int(_mem_val)))
         self.spin_duckdb_mem.valueChanged.connect(lambda v: DUCKDB_SETTINGS.update({'MEMORY_LIMIT': f'{v}GB'}))
         rl.addWidget(self.spin_duckdb_mem, 1, 1)
 
@@ -1157,8 +1158,10 @@ class AnalysisTab(QWidget):
             self._post_worker.progress.connect(lambda m: self.analysis_text.append(m))
             self._post_worker.finished.connect(self._on_post_analysis)
             self._post_worker.error.connect(mw._on_error)
+            mw._set_action_buttons_enabled(False)  # 후처리 중 중복 실행 방지
             self._post_worker.start()
         except Exception as e:
+            mw._set_action_buttons_enabled(True)
             mw._on_error(f"시각화/내보내기 워커 시작 실패: {e}")
 
     def _on_post_analysis(self, data):

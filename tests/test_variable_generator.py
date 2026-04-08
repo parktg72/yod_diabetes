@@ -233,6 +233,15 @@ class TestGenerateDemographics:
         assert df.loc[df['INDI_DSCM_NO'] == 'P001', 'insurance_type'].iloc[0] == '1'
         assert df.loc[df['INDI_DSCM_NO'] == 'P002', 'region_code'].iloc[0] == '26'
 
+    def test_jk_duplicate_rows_deduplicated(self, dm, vg):
+        """JK에 동일 연도 중복 레코드가 있어도 demo_vars 행이 1건만 생성된다."""
+        dm.execute("""
+            INSERT INTO JK VALUES ('P001','2015',4,'2','22',2019,NULL)
+        """)
+        vg.generate_demographics()
+        df = dm.query("SELECT * FROM demo_vars WHERE INDI_DSCM_NO='P001'")
+        assert len(df) == 1, f"JK 중복 레코드 시 1행이어야 함, 실제: {len(df)}"
+
 
 # ---------------------------------------------------------------------------
 # 2. Health Behaviors

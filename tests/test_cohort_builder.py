@@ -843,3 +843,52 @@ class TestBuildCohortFull:
             'follow_up_days', 'follow_up_years',
         }
         assert required.issubset(set(df.columns))
+
+
+class TestCompetingDeathEvent:
+    """competing_death_event: 실제 사망만 1로 분류하고 탈퇴는 0이어야 한다."""
+
+    def test_death_patient_has_competing_event(self, dm):
+        """사망한 P0005의 competing_death_event = 1."""
+        with patch('cohort_builder.mem_manager'):
+            cb = CohortBuilder(dm)
+            _run_steps_up_to(cb, 5)
+            cb.step6_outcomes()
+
+        row = dm.query("""
+            SELECT competing_death_event, dementia_event, death_event
+            FROM analysis_data WHERE INDI_DSCM_NO = 'P0005'
+        """)
+        assert row.iloc[0]['dementia_event'] == 0, "P0005는 치매 미발생이어야 함"
+        assert row.iloc[0]['death_event'] == 1, "P0005는 사망이어야 함"
+        assert row.iloc[0]['competing_death_event'] == 1, "사망 환자는 competing_death_event=1이어야 함"
+
+    def test_non_death_patient_has_no_competing_event(self, dm):
+        """치매 미발생 + 사망 미확인 P0004의 competing_death_event = 0."""
+        with patch('cohort_builder.mem_manager'):
+            cb = CohortBuilder(dm)
+            _run_steps_up_to(cb, 5)
+            cb.step6_outcomes()
+
+        row = dm.query("""
+            SELECT competing_death_event, dementia_event, death_date
+            FROM analysis_data WHERE INDI_DSCM_NO = 'P0004'
+        """)
+        # P0004는 death_date가 없으므로 탈퇴/검열 → competing_death_event=0
+        assert row.iloc[0]['competing_death_event'] == 0, \
+            "사망 미확인 환자는 competing_death_event=0이어야 함"
+
+    def test_dementia_patient_has_no_competing_event(self, dm):
+        """치매 발생 환자는 competing_death_event = 0."""
+        with patch('cohort_builder.mem_manager'):
+            cb = CohortBuilder(dm)
+            _run_steps_up_to(cb, 5)
+            cb.step6_outcomes()
+
+        row = dm.query("""
+            SELECT competing_death_event, dementia_event
+            FROM analysis_data WHERE INDI_DSCM_NO = 'P0001'
+        """)
+        if row.iloc[0]['dementia_event'] == 1:
+            assert row.iloc[0]['competing_death_event'] == 0, \
+                "치매 발생 환자는 competing_death_event=0이어야 함"
