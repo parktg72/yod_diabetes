@@ -680,8 +680,13 @@ class DataLoadTab(QWidget):
         if mw._is_worker_running():
             return
         schema = self.cohort_schema_edit.text().strip()
-        if not schema:
-            QMessageBox.warning(self, "안내", "HANA 스키마를 입력하세요.")
+        # HHDV_SCHEMA / T20_SCHEMA 가 config.py 에 설정된 경우 UI 입력 불필요
+        from config import STUDY_SETTINGS as _SS
+        if not schema and not (_SS.get('HHDV_SCHEMA') and _SS.get('T20_SCHEMA')):
+            QMessageBox.warning(self, "안내",
+                "HANA 스키마를 입력하거나,\n"
+                "메모리/GPU 탭의 'HANA 테이블/스키마 매핑'에서\n"
+                "HHDV 스키마와 T20 스키마를 설정하세요.")
             return
         self._ensure_dm()
 
