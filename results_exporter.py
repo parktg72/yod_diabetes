@@ -81,6 +81,8 @@ class ResultsExporter:
         path = self.output_dir / filename
         _summaries = summaries
         _si = sampling_info
+        # _exposure_group_summary: 노출군별 N/Events/PY 요약
+        _exp_summary = cox_results.get('_exposure_group_summary', {})
 
         def _write(tmp_path):
             with pd.ExcelWriter(tmp_path, engine='openpyxl') as writer:
@@ -89,6 +91,12 @@ class ResultsExporter:
                     if df_out.index.name:
                         df_out = df_out.reset_index()
                     self._write_df_with_sampling_header(writer, df_out, name[:31], _si)
+                # 노출군 요약 시트 추가
+                if _exp_summary:
+                    df_exp = pd.DataFrame(_exp_summary).T
+                    df_exp.index.name = 'Group'
+                    df_exp = df_exp.reset_index()
+                    self._write_df_with_sampling_header(writer, df_exp, 'Exposure_Summary', _si)
 
         self._atomic_excel_write(path, _write)
         return str(path)
@@ -238,29 +246,54 @@ class ResultsExporter:
         return str(path)
 
     def export_sensitivity_results(self, sensitivity_results, filename='sensitivity.xlsx', sampling_info=None):
-        """민감도 분석 결과 내보내기."""
+        """민감도 분석 결과 내보내기.
+
+        중첩 dict(cox_results 등)는 별도 시트로 분리하고,
+        메인 시트에는 scalar/string 값만 포함한다.
+        """
         if not sensitivity_results:
             logger.warning("민감도 결과 내보내기 생략: 데이터 없음")
             return None
 
-        rows = []
-        for key, val in sensitivity_results.items():
-            if isinstance(val, dict):
-                row = {'항목': key}
-                row.update(val)
-                rows.append(row)
+        main_rows = []
+        cox_rows = []  # followup_cutoff_Ny cox_results → 별도 시트
 
-        if not rows:
+        for key, val in sensitivity_results.items():
+            if not isinstance(val, dict):
+                continue
+            # cox_results 중첩 dict는 별도 처리
+            nested_cox = val.get('cox_results', {})
+            flat_val = {k: v for k, v in val.items()
+                        if k != 'cox_results' and not isinstance(v, (dict, list))}
+            row = {'항목': key}
+            row.update(flat_val)
+            main_rows.append(row)
+
+            for exp_var, hr_data in nested_cox.items():
+                if isinstance(hr_data, dict):
+                    cox_rows.append({
+                        '항목': key,
+                        'exposure': exp_var,
+                        'hr': hr_data.get('hr', ''),
+                        'ci_lower': hr_data.get('ci_lower', ''),
+                        'ci_upper': hr_data.get('ci_upper', ''),
+                        'p_value': hr_data.get('p_value', ''),
+                    })
+
+        if not main_rows:
             logger.warning("민감도 결과 내보내기 생략: 저장할 행 없음")
             return None
 
-        df_out = pd.DataFrame(rows)
+        df_main = pd.DataFrame(main_rows)
+        df_cox = pd.DataFrame(cox_rows) if cox_rows else None
         path = self.output_dir / filename
         _si = sampling_info
 
         def _write(tmp_path):
             with pd.ExcelWriter(tmp_path, engine='openpyxl') as writer:
-                self._write_df_with_sampling_header(writer, df_out, 'Sensitivity', _si)
+                self._write_df_with_sampling_header(writer, df_main, 'Sensitivity', _si)
+                if df_cox is not None and not df_cox.empty:
+                    self._write_df_with_sampling_header(writer, df_cox, 'Sensitivity_Cox', _si)
 
         self._atomic_excel_write(path, _write)
         return str(path)
