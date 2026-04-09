@@ -1083,19 +1083,8 @@ class CohortIDExtractor:
             return ids
 
         from config import STUDY_SETTINGS
-        min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
-        max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
-        hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSES_YY')
-        hhdv_table = _resolve_hana_table(hhdv_alias)  # 실제 HANA 테이블명
-        std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
-        byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
-        # 테이블별 스키마 분리 지원: None이면 UI 입력값(self.schema) 사용
-        hhdv_schema = STUDY_SETTINGS.get('HHDV_SCHEMA') or self.schema
+        use_hhdv = bool(STUDY_SETTINGS.get('COHORT_USE_HHDV', False))
         t20_schema = STUDY_SETTINGS.get('T20_SCHEMA') or self.schema
-
-        # 가입자 유형 필터 (GAIBJA_TYPE)
-        gaibja_types = STUDY_SETTINGS.get('HHDV_GAIBJA_TYPES', ('1', '2', '5', '6', '7', '8'))
-        gaibja_sql = ', '.join(f"'{t}'" for t in gaibja_types)
 
         # T20 진료명세서 구분코드 필터
         form_cd_list = STUDY_SETTINGS.get('T20_FORM_CD', ('02', '03', '07', '08', '09', '10', '11', '15'))
@@ -1119,8 +1108,21 @@ class CohortIDExtractor:
         t20_col_type = self.hana._detect_column_type(t20_schema, t20_hana_table, _MONTHLY_FILTER_COL)
         t20_int_where = t20_col_type is not None and 'INT' in t20_col_type.upper()
 
-        # 연령 테이블: 연도별 데이터이므로 연도별 캐시로 중복 HANA 조회 방지
+        # HHDV 사용 여부에 따른 연령 조건 설정
         age_ids_by_year: dict = {}
+        if use_hhdv:
+            min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
+            max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
+            hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSES_YY')
+            hhdv_table = _resolve_hana_table(hhdv_alias)
+            std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
+            byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
+            hhdv_schema = STUDY_SETTINGS.get('HHDV_SCHEMA') or self.schema
+            gaibja_types = STUDY_SETTINGS.get('HHDV_GAIBJA_TYPES', ('1', '2', '5', '6', '7', '8'))
+            gaibja_sql = ', '.join(f"'{t}'" for t in gaibja_types)
+        else:
+            _emit_progress(progress_callback, "[코호트ID] HHDV 단계 스킵 — NHISBASE.TBGJME20 단독 추출")
+            logger.info("CohortIDExtractor: COHORT_USE_HHDV=False, T20 단독 모드")
 
         for idx, yyyymm in enumerate(months, 1):
             year = yyyymm[:4]
@@ -1130,35 +1132,36 @@ class CohortIDExtractor:
                 f"누적 {len(cohort_set):,}명"
             )
 
-            # ── 연령 조건: hhdv_table (연도별 1회 조회 후 캐시) ──────────────────
-            if year not in age_ids_by_year:
-                age_where = (
-                    f"{std_yyyy_col} = '{year}' AND "
-                    f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
-                    f"BETWEEN {min_age} AND {max_age} AND "
-                    f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
-                    f"SEX_TYPE IN ('1', '2') AND "
-                    f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                    f"INDI_DSCM_NO < 90000000"
-                )
-                year_ids: set = set()
-                try:
-                    for chunk_df in self.hana.fetch_table_chunked(
-                        hhdv_table, hhdv_schema,
-                        columns=['INDI_DSCM_NO'],
-                        where_clause=age_where,
-                    ):
-                        year_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
-                        del chunk_df
-                        gc.collect()
-                except Exception as e:
-                    logger.warning("%s %s 조회 실패: %s", hhdv_table, year, e)
-                age_ids_by_year[year] = year_ids
-                logger.debug("%s %s: %d명 (연령+가입자유형 조건)", hhdv_table, year, len(year_ids))
+            # ── 연령 조건: HHDV (use_hhdv=True일 때만) ────────────────────────
+            if use_hhdv:
+                if year not in age_ids_by_year:
+                    age_where = (
+                        f"{std_yyyy_col} = '{year}' AND "
+                        f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
+                        f"BETWEEN {min_age} AND {max_age} AND "
+                        f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
+                        f"SEX_TYPE IN ('1', '2') AND "
+                        f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
+                        f"INDI_DSCM_NO < 90000000"
+                    )
+                    year_ids: set = set()
+                    try:
+                        for chunk_df in self.hana.fetch_table_chunked(
+                            hhdv_table, hhdv_schema,
+                            columns=['INDI_DSCM_NO'],
+                            where_clause=age_where,
+                        ):
+                            year_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
+                            del chunk_df
+                            gc.collect()
+                    except Exception as e:
+                        logger.warning("%s %s 조회 실패: %s", hhdv_table, year, e)
+                    age_ids_by_year[year] = year_ids
+                    logger.debug("%s %s: %d명 (연령+가입자유형 조건)", hhdv_table, year, len(year_ids))
 
-            age_ids = age_ids_by_year[year]
-            if not age_ids:
-                continue
+                age_ids = age_ids_by_year[year]
+                if not age_ids:
+                    continue
 
             # ── 상병 조건: T20 월별 MDCARE_STRT_YYYYMM 필터 ────────────────────
             if t20_int_where:
@@ -1187,18 +1190,28 @@ class CohortIDExtractor:
             except Exception as e:
                 logger.warning("T20 %s DM코드 조회 실패: %s", yyyymm, e)
 
-            # ── 교집합 누적 ───────────────────────────────────────────────────
-            intersection = age_ids & month_dm_ids
-            cohort_set.update(intersection)
-            logger.debug(
-                "%s: 연령 %d명, DM코드 %d명, 교집합 %d명 (누적 %d명)",
-                yyyymm, len(age_ids), len(month_dm_ids), len(intersection), len(cohort_set)
-            )
+            # ── 누적: HHDV 사용 시 교집합, 미사용 시 T20 결과 직접 누적 ──────────
+            if use_hhdv:
+                intersection = age_ids & month_dm_ids
+                cohort_set.update(intersection)
+                logger.debug(
+                    "%s: 연령 %d명, DM코드 %d명, 교집합 %d명 (누적 %d명)",
+                    yyyymm, len(age_ids), len(month_dm_ids), len(intersection), len(cohort_set)
+                )
+            else:
+                cohort_set.update(month_dm_ids)
+                logger.debug(
+                    "%s: DM코드 %d명 (누적 %d명, T20 단독)",
+                    yyyymm, len(month_dm_ids), len(cohort_set)
+                )
 
         if not cohort_set:
+            mode = "HHDV+T20" if use_hhdv else "T20(NHISBASE.TBGJME20) 단독"
             raise RuntimeError(
-                "CohortIDExtractor: 조건을 만족하는 환자가 없습니다. "
-                f"ENROLLMENT 기간, 연령 범위, {hhdv_table}/T20 접근 권한을 확인하세요."
+                f"CohortIDExtractor: 조건을 만족하는 환자가 없습니다. [{mode} 모드]\n"
+                f"진입기간({STUDY_SETTINGS.get('ENROLLMENT_START')}~"
+                f"{STUDY_SETTINGS.get('ENROLLMENT_END')}), "
+                f"T20 스키마({t20_schema}), 테이블({t20_hana_table}) 접근 권한을 확인하세요."
             )
 
         # 캐시 저장

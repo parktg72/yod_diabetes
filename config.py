@@ -213,19 +213,19 @@ STUDY_SETTINGS = {
     'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
     'HHDV_SCHEMA': 'NHISBDA',         # HHDV_DSES_YY 조회 스키마
     'HHDV_GAIBJA_TYPES': ('1', '2', '5', '6', '7', '8'),  # 가입자 유형 필터
-    'T20_SCHEMA': 'NHISASE',          # CohortIDExtractor T20 조회 스키마
+    'T20_SCHEMA': 'NHISBASE',         # CohortIDExtractor T20 조회 스키마
     # T20 진료내역 필터 (SAS 쿼리 기준)
     'T20_FORM_CD': ('02', '03', '07', '08', '09', '10', '11', '15'),  # 진료명세서 구분코드
     'T20_PAY_YN': '1',                # 급여구분 (1=급여)
+    # HHDV 단계 스킵 여부: True=T20 단독으로 코호트 ID 추출 (HHDV 접근 권한 없을 때)
+    'COHORT_USE_HHDV': False,
     # ── 실제 HANA 테이블명 매핑 ─────────────────────────────────────────────
     # 내부 별칭(T20/T30/T40/T60)과 실제 HANA 테이블명이 다를 때 설정.
-    # UI 경로란에 'NHISASE.HBMT_TBGJME20' 형식으로 입력하거나
-    # 별칭(T20)만 입력해도 아래 매핑으로 자동 변환됩니다.
     'HANA_TABLE_MAP': {
-        'T20': 'HBMT_TBGJME20',   # NHISASE.HBMT_TBGJME20
-        'T30': 'HBMT_TBGJME30',   # NHISASE.HBMT_TBGJME30
-        'T40': 'HBMT_TBGJME40',   # NHISASE.HBMT_TBGJME40
-        'T60': 'HBMT_TBGJME60',   # NHISASE.HBMT_TBGJME60
+        'T20': 'TBGJME20',        # NHISBASE.TBGJME20
+        'T30': 'TBGJME30',        # NHISBASE.TBGJME30
+        'T40': 'TBGJME40',        # NHISBASE.TBGJME40
+        'T60': 'TBGJME60',        # NHISBASE.TBGJME60
     },
     'INPATIENT_FORM_CD': '02',        # T20 입원 진료명세서 구분코드 (외래='01', 입원='02')
     'AGE65_CENSOR_MONTH': '0101',     # 65세 censoring 기준월일 (MMDD). 기본='0101'(1월1일).
