@@ -508,11 +508,13 @@ class CohortBuilder:
         n_bad = int(bad_fu.iloc[0, 0]) if len(bad_fu) > 0 else 0
         if n_bad > 0:
             self.dm.execute("DELETE FROM analysis_data WHERE follow_up_days <= 0")
-            logger.warning(
-                f"follow_up_days <= 0: {n_bad:,}건 제거 (index_date >= censor_date — "
-                f"자격 소멸·사망이 index_date와 동일하거나 이전인 케이스). "
-                f"cohort 기준일 또는 censor 조건을 확인하세요."
+            msg = (
+                f"[데이터 정리] follow_up_days <= 0인 {n_bad:,}건을 제거했습니다.\n"
+                f"원인: index_date >= censor_date (자격 소멸·사망이 진입일과 동일하거나 이전).\n"
+                f"비율이 높으면 config.py의 ENROLLMENT_END 또는 censor 조건을 확인하세요."
             )
+            logger.warning(msg.replace('\n', ' '))
+            if cb: cb(f"[경고] {msg}")
 
         events = self.dm.query("""
             SELECT exposure_group, COUNT(*) n, SUM(dementia_event) dem, SUM(ad_event) ad, SUM(vad_event) vad,
@@ -520,6 +522,37 @@ class CohortBuilder:
             FROM analysis_data GROUP BY exposure_group
         """)
         logger.info(f"Step 6:\n{events.to_string()}")
+
+        # 무결성 검증: 노출군 0건 경고
+        integrity_warnings = []
+        for _, row in events.iterrows():
+            g, n_g = row['exposure_group'], int(row['n'])
+            if n_g == 0:
+                integrity_warnings.append(
+                    f"노출군 '{g}' 0건 — 해당 군은 Cox/PSM 분석에서 자동 제외됩니다."
+                )
+            elif int(row.get('dem', 0) or 0) == 0:
+                integrity_warnings.append(
+                    f"노출군 '{g}' 치매 이벤트 0건 — Cox 회귀에서 해당 군 계수 추정 불가."
+                )
+
+        # follow_up_years 음수 잔류 확인 (혹시 DELETE 누락 시)
+        neg_check = self.dm.query(
+            "SELECT COUNT(*) AS n FROM analysis_data WHERE follow_up_years < 0"
+        )
+        n_neg = int(neg_check.iloc[0, 0]) if len(neg_check) > 0 else 0
+        if n_neg > 0:
+            integrity_warnings.append(
+                f"follow_up_years 음수 {n_neg:,}건 잔류 — 추적기간 산출 오류 가능."
+            )
+
+        if integrity_warnings and cb:
+            for w in integrity_warnings:
+                cb(f"[무결성 경고] {w}")
+
+        # n_bad를 events 반환값에 메타데이터로 포함 (UI 표시용)
+        events.attrs['removed_bad_fu'] = n_bad
+        events.attrs['integrity_warnings'] = integrity_warnings
         return events
 
     def build_cohort(self, cb=None):
@@ -603,6 +636,18 @@ class CohortBuilder:
             self.step6_outcomes, "analysis_data"
         )
         mem_manager.cleanup_after_step('step6')
+
+        # 무결성 경고를 results에 전달 (UI의 _on_cohort에서 표시)
+        outcomes_df = results.get('outcomes')
+        if outcomes_df is not None and hasattr(outcomes_df, 'attrs'):
+            removed = outcomes_df.attrs.get('removed_bad_fu', 0)
+            integrity_w = outcomes_df.attrs.get('integrity_warnings', [])
+            if removed > 0:
+                results['warnings'] = results.get('warnings', []) + [
+                    f"추적기간 0일 이하 {removed:,}건 제거됨 — cohort 기준 확인 필요"
+                ]
+            if integrity_w:
+                results['warnings'] = results.get('warnings', []) + integrity_w
 
         if cb: cb("코호트 구축 완료!")
         return results

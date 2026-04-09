@@ -1348,8 +1348,25 @@ class StatisticalAnalyzer:
 
     def run_selected(self, cb=None, run_cox=True, run_psm=True,
                      run_interaction=True, run_subgroup=True, run_sensitivity=True,
-                     run_competing_risks=True):
-        """선택된 분석만 실행 — 체크박스 상태를 그대로 반영"""
+                     run_competing_risks=True, results_dir=None, resume=False):
+        """선택된 분석만 실행 — 체크박스 상태를 그대로 반영.
+
+        Args:
+            results_dir: 결과 저장 경로 (체크포인트 파일 위치). None이면 체크포인트 비활성.
+            resume: True면 이전 체크포인트에서 완료된 단계 건너뜀.
+        """
+        # B2: 체크포인트 초기화
+        checkpoint = None
+        if results_dir is not None:
+            from analysis_checkpoint import AnalysisCheckpoint
+            checkpoint = AnalysisCheckpoint(results_dir, STUDY_SETTINGS)
+            if resume and checkpoint.completed_steps():
+                msg = f"이전 체크포인트에서 재개: {', '.join(checkpoint.completed_steps())}"
+                logger.info(msg)
+                if cb: cb(f"[재개] {msg}")
+            elif not resume:
+                checkpoint.reset()  # 새 실행 시 이전 체크포인트 초기화
+
         raw, info = self._load_data(cb=cb)
         df_prepared = self._prepare(raw, cb=cb)
         logger.info(f"분석 데이터 준비 완료: {len(df_prepared):,}건, "
@@ -1376,8 +1393,19 @@ class StatisticalAnalyzer:
         _done_steps = [0]  # 가변 카운터 (클로저용 리스트)
 
         def _safe_run(step_name, fn):
+            # B2: 이미 완료된 단계는 체크포인트 기반 건너뜀
+            if checkpoint and resume and checkpoint.can_resume(step_name):
+                logger.info("체크포인트: %s 건너뜀 (이미 완료)", step_name)
+                if cb: cb(f"[재개] {step_name} 건너뜀 (이미 완료)")
+                _done_steps[0] += 1
+                pct = int(_done_steps[0] / _total_steps * 100) if _total_steps > 0 else 100
+                if cb: cb(f"[{pct}%] {step_name} 건너뜀")
+                return
             try:
                 fn()
+                # B2: 성공 시 체크포인트 저장
+                if checkpoint:
+                    checkpoint.mark_done(step_name, self.results.get(step_name))
             except (InsufficientDataError, RuntimeError) as e:
                 step_errors[step_name] = str(e)
                 logger.warning("분석 단계 스킵 (%s): %s", step_name, e)
