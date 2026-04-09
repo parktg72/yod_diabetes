@@ -715,9 +715,10 @@ class DataLoadTab(QWidget):
                 schema, force=force_extract, progress_callback=progress_callback
             )
 
-        def on_done(result):
+        def on_done(data):
             mw.progress_bar.setVisible(False)
             mw._set_action_buttons_enabled(True)
+            result = data.get('result')
             if isinstance(result, Exception):
                 self.lbl_cohort_status.setText("코호트 ID 추출 실패")
                 self.lbl_cohort_status.setStyleSheet("color: red;")
@@ -731,7 +732,13 @@ class DataLoadTab(QWidget):
                                  f"{STUDY_SETTINGS['ENROLLMENT_START']}~"
                                  f"{STUDY_SETTINGS['ENROLLMENT_END']})")
 
-        mw._run_worker(do_extract, on_done)
+        from main_app import WorkerThread
+        self.ctx.worker = WorkerThread(do_extract)
+        mw.worker = self.ctx.worker
+        self.ctx.worker.progress.connect(self.log_signal.emit)
+        self.ctx.worker.finished.connect(on_done)
+        self.ctx.worker.error.connect(mw._on_error)
+        self.ctx.worker.start()
 
     def start_data_load(self):
         mw = self.ctx.main_window
