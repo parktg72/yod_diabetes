@@ -211,6 +211,10 @@ STUDY_SETTINGS = {
     'HHDV_TABLE': 'HHDV_DSEC_YY',    # 연령 정보 테이블 (코호트 ID 추출 시 사용)
     'HHDV_STD_YYYY_COL': 'STD_YYYY', # HHDV 자격 연도 컬럼명
     'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
+    'HHDV_SCHEMA': None,              # HHDV 전용 스키마 — None이면 코호트 UI 입력값 사용
+                                      # 예: 'NHISBD'  (HHDV_DSEC_YY 가 별도 스키마에 있을 때)
+    'T20_SCHEMA': None,               # T20 전용 스키마 — None이면 코호트 UI 입력값 사용
+                                      # 예: 'NHISBASE' (T20 가 별도 스키마에 있을 때)
     'INPATIENT_FORM_CD': '02',        # T20 입원 진료명세서 구분코드 (외래='01', 입원='02')
     'AGE65_CENSOR_MONTH': '0101',     # 65세 censoring 기준월일 (MMDD). 기본='0101'(1월1일).
                                       # 생년월일 미보유로 인해 최대 ~11개월 조기 censoring 발생.

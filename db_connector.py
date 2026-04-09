@@ -1078,6 +1078,9 @@ class CohortIDExtractor:
         hhdv_table = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSEC_YY')
         std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
         byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
+        # 테이블별 스키마 분리 지원: None이면 UI 입력값(self.schema) 사용
+        hhdv_schema = STUDY_SETTINGS.get('HHDV_SCHEMA') or self.schema
+        t20_schema = STUDY_SETTINGS.get('T20_SCHEMA') or self.schema
 
         months = self._enrollment_month_range()
         total = len(months)
@@ -1091,7 +1094,7 @@ class CohortIDExtractor:
         )
 
         # T20 MDCARE_STRT_YYYYMM 컬럼 타입 (INT vs VARCHAR) — 루프 전 1회만 감지
-        t20_col_type = self.hana._detect_column_type(self.schema, 'T20', _MONTHLY_FILTER_COL)
+        t20_col_type = self.hana._detect_column_type(t20_schema, 'T20', _MONTHLY_FILTER_COL)
         t20_int_where = t20_col_type is not None and 'INT' in t20_col_type.upper()
 
         # 연령 테이블: 연도별 데이터이므로 연도별 캐시로 중복 HANA 조회 방지
@@ -1115,7 +1118,7 @@ class CohortIDExtractor:
                 year_ids: set = set()
                 try:
                     for chunk_df in self.hana.fetch_table_chunked(
-                        hhdv_table, self.schema,
+                        hhdv_table, hhdv_schema,
                         columns=['INDI_DSCM_NO'],
                         where_clause=age_where,
                     ):
@@ -1141,7 +1144,7 @@ class CohortIDExtractor:
             month_dm_ids: set = set()
             try:
                 for chunk_df in self.hana.fetch_table_chunked(
-                    'T20', self.schema,
+                    'T20', t20_schema,
                     columns=['INDI_DSCM_NO'],
                     where_clause=t20_where,
                 ):

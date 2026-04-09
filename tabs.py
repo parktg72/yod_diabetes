@@ -487,7 +487,9 @@ class DataLoadTab(QWidget):
 
         cl.addWidget(QLabel("HANA 스키마:"), 0, 0)
         self.cohort_schema_edit = QLineEdit()
-        self.cohort_schema_edit.setPlaceholderText("예: NHIS")
+        self.cohort_schema_edit.setPlaceholderText(
+            "예: NHISBASE  (HHDV/T20 스키마가 다를 경우 config.py HHDV_SCHEMA/T20_SCHEMA 설정)"
+        )
         cl.addWidget(self.cohort_schema_edit, 0, 1, 1, 2)
 
         cl.addWidget(QLabel("진입기간:"), 1, 0)
