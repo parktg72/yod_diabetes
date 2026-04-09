@@ -213,22 +213,16 @@ STUDY_SETTINGS = {
     'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
     'HHDV_SCHEMA': None,              # HHDV 전용 스키마 — None이면 코호트 UI 입력값 사용
                                       # 예: 'NHISBDA'
-    'T20_SCHEMA': None,               # T20 전용 스키마 — None이면 코호트 UI 입력값 사용
-                                      # 예: 'NHISBASE'
+    'T20_SCHEMA': 'NHISASE',          # CohortIDExtractor T20 조회 스키마
     # ── 실제 HANA 테이블명 매핑 ─────────────────────────────────────────────
-    # 내부 별칭(T20/T30/T40/T60/HHDV_DSEC_YY)과 실제 HANA 테이블명이 다를 때 설정.
-    # None 또는 키 없으면 내부 별칭을 그대로 HANA 테이블명으로 사용.
-    # 예시 (NHIS 실제 환경):
-    #   'T20': 'HBMT_TBGJME20'
-    #   'T30': 'HBMT_TBGJME30'
-    #   'T40': 'HBMT_TBGJME40'
-    #   'T60': 'HBMT_TBGJME60'
-    #   'HHDV_DSEC_YY': 'HHDV_DSEC_YY'   ← 변경 없으면 생략 가능
+    # 내부 별칭(T20/T30/T40/T60)과 실제 HANA 테이블명이 다를 때 설정.
+    # UI 경로란에 'NHISASE.HBMT_TBGJME20' 형식으로 입력하거나
+    # 별칭(T20)만 입력해도 아래 매핑으로 자동 변환됩니다.
     'HANA_TABLE_MAP': {
-        'T20': 'HBMT_TBGJME20',
-        'T30': 'HBMT_TBGJME30',
-        'T40': 'HBMT_TBGJME40',
-        'T60': 'HBMT_TBGJME60',
+        'T20': 'HBMT_TBGJME20',   # NHISASE.HBMT_TBGJME20
+        'T30': 'HBMT_TBGJME30',   # NHISASE.HBMT_TBGJME30
+        'T40': 'HBMT_TBGJME40',   # NHISASE.HBMT_TBGJME40
+        'T60': 'HBMT_TBGJME60',   # NHISASE.HBMT_TBGJME60
     },
     'INPATIENT_FORM_CD': '02',        # T20 입원 진료명세서 구분코드 (외래='01', 입원='02')
     'AGE65_CENSOR_MONTH': '0101',     # 65세 censoring 기준월일 (MMDD). 기본='0101'(1월1일).
