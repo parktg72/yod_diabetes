@@ -370,6 +370,14 @@ def save_settings(path=None):
     return str(p)
 
 
+# config.py에서만 관리하는 인프라 설정 — JSON 복원 시 덮어쓰지 않음
+_INFRA_SETTINGS_KEYS = frozenset({
+    'T20_SCHEMA', 'HHDV_SCHEMA', 'HANA_TABLE_MAP',
+    'HHDV_TABLE', 'T20_FORM_CD', 'T20_PAY_YN',
+    'HHDV_GAIBJA_TYPES', 'COHORT_USE_HHDV',
+})
+
+
 def load_settings(path=None):
     """JSON 파일에서 설정 복원"""
     p = Path(path) if path else _SETTINGS_FILE
@@ -379,7 +387,7 @@ def load_settings(path=None):
     for name, settings_dict in _SAVEABLE_SETTINGS.items():
         if name in data:
             for k, v in data[name].items():
-                if k in settings_dict:
+                if k in settings_dict and k not in _INFRA_SETTINGS_KEYS:
                     # Restore Infinity
                     if v == "Infinity":
                         settings_dict[k] = float('inf')
