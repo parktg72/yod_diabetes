@@ -1028,7 +1028,7 @@ class CohortIDExtractor:
 
     흐름:
       ① 진입기간(ENROLLMENT_START~END) 모든 YYYYMM 순회
-      ② 각 월: HHDV_DSEC_YY(연령조건) ∩ T20(E10~E14 상병조건) → 교집합을 set에 누적
+      ② 각 월: HHDT_DSES_YY(연령조건) ∩ T20(E10~E14 상병조건) → 교집합을 set에 누적
       ③ 전체 누적 set → cohort_ids.parquet 캐시 (resume 지원)
 
     Args:
@@ -1085,7 +1085,7 @@ class CohortIDExtractor:
         from config import STUDY_SETTINGS
         min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
         max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
-        hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSEC_YY')
+        hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDT_DSES_YY')
         hhdv_table = _resolve_hana_table(hhdv_alias)  # 실제 HANA 테이블명
         std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
         byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
@@ -1093,15 +1093,25 @@ class CohortIDExtractor:
         hhdv_schema = STUDY_SETTINGS.get('HHDV_SCHEMA') or self.schema
         t20_schema = STUDY_SETTINGS.get('T20_SCHEMA') or self.schema
 
+        # 가입자 유형 필터 (GAIBJA_TYPE)
+        gaibja_types = STUDY_SETTINGS.get('HHDV_GAIBJA_TYPES', ('1', '2', '5', '6', '7', '8'))
+        gaibja_sql = ', '.join(f"'{t}'" for t in gaibja_types)
+
+        # T20 진료명세서 구분코드 필터
+        form_cd_list = STUDY_SETTINGS.get('T20_FORM_CD', ('02', '03', '07', '08', '09', '10', '11', '15'))
+        form_cd_sql = ', '.join(f"'{c}'" for c in form_cd_list)
+        pay_yn = STUDY_SETTINGS.get('T20_PAY_YN', '1')
+
         months = self._enrollment_month_range()
         total = len(months)
         cohort_set = set()
 
-        # T20 상병조건 SQL 조각 (E10~E14 명시적 IN)
+        # T20 상병조건 SQL 조각: SICK_SYM1~3 × 3자리 PREFIX (SAS 쿼리 기준)
         dm_codes_sql = ', '.join(f"'{c}'" for c in _DM_CODES)
+        sick_sym_cols = ('SICK_SYM1', 'SICK_SYM2', 'SICK_SYM3')
         sick_conditions = ' OR '.join(
             f"SUBSTR(\"{col}\", 1, 3) IN ({dm_codes_sql})"
-            for col in _SICK_SYM_COLS
+            for col in sick_sym_cols
         )
 
         # T20 실제 HANA 테이블명 (HANA_TABLE_MAP 참조)
@@ -1126,7 +1136,11 @@ class CohortIDExtractor:
                 age_where = (
                     f"{std_yyyy_col} = '{year}' AND "
                     f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
-                    f"BETWEEN {min_age} AND {max_age}"
+                    f"BETWEEN {min_age} AND {max_age} AND "
+                    f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
+                    f"SEX_TYPE IN ('1', '2') AND "
+                    f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
+                    f"INDI_DSCM_NO < 90000000"
                 )
                 year_ids: set = set()
                 try:
@@ -1141,7 +1155,7 @@ class CohortIDExtractor:
                 except Exception as e:
                     logger.warning("%s %s 조회 실패: %s", hhdv_table, year, e)
                 age_ids_by_year[year] = year_ids
-                logger.debug("%s %s: %d명 (연령 조건)", hhdv_table, year, len(year_ids))
+                logger.debug("%s %s: %d명 (연령+가입자유형 조건)", hhdv_table, year, len(year_ids))
 
             age_ids = age_ids_by_year[year]
             if not age_ids:
@@ -1152,7 +1166,14 @@ class CohortIDExtractor:
                 month_filter = f"{_MONTHLY_FILTER_COL} = {int(yyyymm)}"
             else:
                 month_filter = f"{_MONTHLY_FILTER_COL} = '{yyyymm}'"
-            t20_where = f"{month_filter} AND ({sick_conditions})"
+            t20_where = (
+                f"{month_filter} AND "
+                f"PAY_YN = '{pay_yn}' AND "
+                f"FORM_CD IN ({form_cd_sql}) AND "
+                f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
+                f"INDI_DSCM_NO < 90000000 AND "
+                f"({sick_conditions})"
+            )
 
             month_dm_ids: set = set()
             try:
@@ -1781,7 +1802,7 @@ class DataManager:
     def extract_cohort_ids(self, hana_schema, force=True, progress_callback=None):
         """진입기간 내 연령+DM 코드 조건 충족 INDI_DSCM_NO를 월별 추출해 frozenset 반환.
 
-        HHDV_DSEC_YY(연령) ∩ T20(E10~E14 상병)을 진입기간 월별로 순회하며 누적.
+        HHDT_DSES_YY(연령) ∩ T20(E10~E14 상병)을 진입기간 월별로 순회하며 누적.
         결과는 cohort_ids.parquet으로 캐시되어 resume 모드에서 재사용된다.
         """
         if not self.hana:
