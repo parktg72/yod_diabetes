@@ -208,10 +208,10 @@ STUDY_SETTINGS = {
     'PH_BONFERRONI': True,        # PH 검정 Bonferroni 다중검증 보정 (변수 수로 나눔)
     'PSM_CALIPER': 0.2,           # PSM caliper = PSM_CALIPER × pooled logit(PS) SD
     'PSM_SMD_THRESHOLD': 0.1,     # PSM 균형 판정 SMD 임계값
-    'HHDV_TABLE': 'HHDT_DSES_YY',     # 연령/자격 정보 테이블 (NHISBDA.HHDT_DSES_YY)
+    'HHDV_TABLE': 'HHDV_DSES_YY',     # 연령/자격 정보 테이블 (NHISBDA.HHDV_DSES_YY)
     'HHDV_STD_YYYY_COL': 'STD_YYYY', # HHDV 자격 연도 컬럼명
     'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
-    'HHDV_SCHEMA': 'NHISBDA',         # HHDT_DSES_YY 조회 스키마
+    'HHDV_SCHEMA': 'NHISBDA',         # HHDV_DSES_YY 조회 스키마
     'HHDV_GAIBJA_TYPES': ('1', '2', '5', '6', '7', '8'),  # 가입자 유형 필터
     'T20_SCHEMA': 'NHISASE',          # CohortIDExtractor T20 조회 스키마
     # T20 진료내역 필터 (SAS 쿼리 기준)

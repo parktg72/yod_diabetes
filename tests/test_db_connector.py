@@ -942,7 +942,7 @@ def _make_mock_hana(hhdv_rows_by_year=None, t20_rows_by_month=None):
 
     def fake_fetch(table_name, schema, columns=None, where_clause=None, chunk_size=None):
         """table_name 과 where_clause 로 mock 데이터를 반환하는 제너레이터."""
-        if table_name == 'HHDT_DSES_YY':
+        if table_name == 'HHDV_DSES_YY':
             # STD_YYYY = 'YYYY' 에서 연도 파싱
             year = None
             if where_clause:
@@ -1088,7 +1088,7 @@ class TestCohortIDExtractor:
         call_count = {'n': 0}
 
         def fake_fetch(table_name, schema, columns=None, where_clause=None, chunk_size=None):
-            if table_name == 'HHDT_DSES_YY':
+            if table_name == 'HHDV_DSES_YY':
                 call_count['n'] += 1
                 import re as _re
                 m = _re.search(r"STD_YYYY\s*=\s*'(\d{4})'", where_clause or '')
@@ -1203,7 +1203,7 @@ class TestHANAConnectorRetry:
                 extractor.extract(force=True)
 
     def test_hhdv_queried_once_per_year(self, tmp_path):
-        """HHDT_DSES_YY는 연도별 1회만 조회한다 (12개월 × 1년 = 1회)."""
+        """HHDV_DSES_YY는 연도별 1회만 조회한다 (12개월 × 1년 = 1회)."""
         hana = _make_mock_hana(
             hhdv_rows_by_year={'2013': ['P001']},
             t20_rows_by_month={'201301': ['P001']},
@@ -1219,10 +1219,10 @@ class TestHANAConnectorRetry:
 
         hhdv_calls = [
             c for c in hana.fetch_table_chunked.call_args_list
-            if c.args[0] == 'HHDT_DSES_YY'
+            if c.args[0] == 'HHDV_DSES_YY'
         ]
         assert len(hhdv_calls) == 1, \
-            f"HHDT_DSES_YY는 연도별 1회만 조회해야 한다. 실제: {len(hhdv_calls)}회"
+            f"HHDV_DSES_YY는 연도별 1회만 조회해야 한다. 실제: {len(hhdv_calls)}회"
 
     def test_monthly_extraction_with_cohort_ids(self, tmp_path):
         """MonthlyHanaExtractor에 cohort_ids 전달 시 WHERE 절에 IN 조건이 추가된다."""
@@ -1290,8 +1290,8 @@ class TestHANAConnectorRetry:
 
         assert custom_table in queried_tables, \
             f"HHDV_TABLE='{custom_table}' 설정 시 해당 테이블 조회 필요. 실제 조회: {queried_tables}"
-        assert 'HHDT_DSES_YY' not in queried_tables, \
-            "커스텀 HHDV_TABLE 설정 시 기본 'HHDT_DSES_YY' 조회 금지"
+        assert 'HHDV_DSES_YY' not in queried_tables, \
+            "커스텀 HHDV_TABLE 설정 시 기본 'HHDV_DSES_YY' 조회 금지"
 
 
 class TestDuckDBStorageExecuteParams:

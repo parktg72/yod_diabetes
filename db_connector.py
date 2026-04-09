@@ -1028,7 +1028,7 @@ class CohortIDExtractor:
 
     흐름:
       ① 진입기간(ENROLLMENT_START~END) 모든 YYYYMM 순회
-      ② 각 월: HHDT_DSES_YY(연령조건) ∩ T20(E10~E14 상병조건) → 교집합을 set에 누적
+      ② 각 월: HHDV_DSES_YY(연령조건) ∩ T20(E10~E14 상병조건) → 교집합을 set에 누적
       ③ 전체 누적 set → cohort_ids.parquet 캐시 (resume 지원)
 
     Args:
@@ -1085,7 +1085,7 @@ class CohortIDExtractor:
         from config import STUDY_SETTINGS
         min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
         max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
-        hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDT_DSES_YY')
+        hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSES_YY')
         hhdv_table = _resolve_hana_table(hhdv_alias)  # 실제 HANA 테이블명
         std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
         byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
@@ -1106,12 +1106,11 @@ class CohortIDExtractor:
         total = len(months)
         cohort_set = set()
 
-        # T20 상병조건 SQL 조각: SICK_SYM1~3 × 3자리 PREFIX (SAS 쿼리 기준)
+        # T20 상병조건 SQL 조각: SICK_SYM1~5 × 3자리 PREFIX (SAS 쿼리 기준)
         dm_codes_sql = ', '.join(f"'{c}'" for c in _DM_CODES)
-        sick_sym_cols = ('SICK_SYM1', 'SICK_SYM2', 'SICK_SYM3')
         sick_conditions = ' OR '.join(
             f"SUBSTR(\"{col}\", 1, 3) IN ({dm_codes_sql})"
-            for col in sick_sym_cols
+            for col in _SICK_SYM_COLS
         )
 
         # T20 실제 HANA 테이블명 (HANA_TABLE_MAP 참조)
@@ -1802,7 +1801,7 @@ class DataManager:
     def extract_cohort_ids(self, hana_schema, force=True, progress_callback=None):
         """진입기간 내 연령+DM 코드 조건 충족 INDI_DSCM_NO를 월별 추출해 frozenset 반환.
 
-        HHDT_DSES_YY(연령) ∩ T20(E10~E14 상병)을 진입기간 월별로 순회하며 누적.
+        HHDV_DSES_YY(연령) ∩ T20(E10~E14 상병)을 진입기간 월별로 순회하며 누적.
         결과는 cohort_ids.parquet으로 캐시되어 resume 모드에서 재사용된다.
         """
         if not self.hana:

@@ -23,4 +23,4 @@
 
 1. **대상자 우선 선정 후 매칭 추출** 구조를 따른다.
    - 사용자의 조건(진입기간, 연령, 상병코드 등)에 따라 대상자를 먼저 선정하고, 선정된 대상자의 `INDI_DSCM_NO`로 각 테이블에서 매칭되는 레코드를 추출한다.
-   - 구현체: `CohortIDExtractor` (HHDT_DSES_YY + T20 → cohort_ids.parquet) → `MonthlyHanaExtractor` / `load_table_to_duckdb` (INDI_DSCM_NO IN 필터 적용).
+   - 구현체: `CohortIDExtractor` (HHDV_DSES_YY + T20 → cohort_ids.parquet) → `MonthlyHanaExtractor` / `load_table_to_duckdb` (INDI_DSCM_NO IN 필터 적용).
