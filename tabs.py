@@ -17,7 +17,7 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QFont
 
-from config import APP_SETTINGS, STUDY_SETTINGS, MEMORY_SETTINGS, GPU_SETTINGS, CHUNK_SETTINGS, DUCKDB_SETTINGS
+from config import APP_SETTINGS, STUDY_SETTINGS, MEMORY_SETTINGS, GPU_SETTINGS, CHUNK_SETTINGS, DUCKDB_SETTINGS, save_settings
 from db_connector import DataManager
 from cohort_builder import CohortBuilder
 from variable_generator import VariableGenerator
@@ -250,10 +250,56 @@ class MemoryTab(QWidget):
         ml.addWidget(self.mem_bar)
         ly.addWidget(mg)
 
+        # HANA 테이블 매핑 설정
+        hg = QGroupBox("HANA 테이블/스키마 매핑 (변경 후 저장 버튼 클릭)")
+        hl = QGridLayout(hg)
+
+        table_map = STUDY_SETTINGS.get('HANA_TABLE_MAP', {})
+        mapping_defs = [
+            ('HHDV_SCHEMA',  'HHDV 스키마',   STUDY_SETTINGS.get('HHDV_SCHEMA', '')),
+            ('T20_SCHEMA',   'T20 스키마',    STUDY_SETTINGS.get('T20_SCHEMA', '')),
+            ('T20_TABLE',    'T20 실제 테이블명', table_map.get('T20', 'HBMT_TBGJME20')),
+            ('T30_TABLE',    'T30 실제 테이블명', table_map.get('T30', 'HBMT_TBGJME30')),
+            ('T40_TABLE',    'T40 실제 테이블명', table_map.get('T40', 'HBMT_TBGJME40')),
+            ('T60_TABLE',    'T60 실제 테이블명', table_map.get('T60', 'HBMT_TBGJME60')),
+            ('HHDV_TABLE',   'HHDV 실제 테이블명', STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSEC_YY')),
+        ]
+        self._hana_map_edits = {}
+        for i, (key, label, val) in enumerate(mapping_defs):
+            hl.addWidget(QLabel(label + ':'), i, 0)
+            edit = QLineEdit(str(val) if val else '')
+            edit.setPlaceholderText(f"예: {val}")
+            hl.addWidget(edit, i, 1)
+            self._hana_map_edits[key] = edit
+
+        btn_save_map = QPushButton("저장 (yod_settings.json)")
+        btn_save_map.setStyleSheet("background-color: #2980B9; color: white; padding: 5px;")
+        btn_save_map.clicked.connect(self._save_hana_map)
+        hl.addWidget(btn_save_map, len(mapping_defs), 0, 1, 2)
+        ly.addWidget(hg)
+
         ly.addStretch()
         self._update_mem_status()
 
     # --- actions ---
+    def _save_hana_map(self):
+        """HANA 테이블/스키마 매핑을 STUDY_SETTINGS에 반영하고 yod_settings.json에 저장."""
+        edits = self._hana_map_edits
+        STUDY_SETTINGS['HHDV_SCHEMA'] = edits['HHDV_SCHEMA'].text().strip() or None
+        STUDY_SETTINGS['T20_SCHEMA'] = edits['T20_SCHEMA'].text().strip() or None
+        STUDY_SETTINGS['HHDV_TABLE'] = edits['HHDV_TABLE'].text().strip() or 'HHDV_DSEC_YY'
+        table_map = STUDY_SETTINGS.get('HANA_TABLE_MAP', {})
+        for alias in ('T20', 'T30', 'T40', 'T60'):
+            val = edits[f'{alias}_TABLE'].text().strip()
+            if val:
+                table_map[alias] = val
+        STUDY_SETTINGS['HANA_TABLE_MAP'] = table_map
+        try:
+            path = save_settings()
+            self.log_signal.emit(f"HANA 매핑 저장 완료: {path}")
+        except Exception as e:
+            self.log_signal.emit(f"[오류] HANA 매핑 저장 실패: {e}")
+
     def _set_ram(self, gb):
         MEMORY_SETTINGS['RAM_LIMIT_GB'] = float(gb)
         mem_manager.ram_limit_gb = float(gb)
