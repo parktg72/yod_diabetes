@@ -373,7 +373,8 @@ def save_settings(path=None):
 # config.py에서만 관리하는 인프라 설정 — JSON 복원 시 덮어쓰지 않음
 _INFRA_SETTINGS_KEYS = frozenset({
     'T20_SCHEMA', 'HHDV_SCHEMA', 'HANA_TABLE_MAP',
-    'HHDV_TABLE', 'T20_FORM_CD', 'T20_PAY_YN',
+    'HHDV_TABLE', 'HHDV_STD_YYYY_COL', 'HHDV_BYEAR_COL',
+    'T20_FORM_CD', 'T20_PAY_YN',
     'HHDV_GAIBJA_TYPES', 'COHORT_USE_HHDV',
 })
 
