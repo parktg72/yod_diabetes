@@ -208,17 +208,17 @@ STUDY_SETTINGS = {
     'PH_BONFERRONI': True,        # PH 검정 Bonferroni 다중검증 보정 (변수 수로 나눔)
     'PSM_CALIPER': 0.2,           # PSM caliper = PSM_CALIPER × pooled logit(PS) SD
     'PSM_SMD_THRESHOLD': 0.1,     # PSM 균형 판정 SMD 임계값
-    'HHDV_TABLE': 'HHDV_DSES_YY',     # 연령/자격 정보 테이블 (NHISBDA.HHDV_DSES_YY)
-    'HHDV_STD_YYYY_COL': 'STD_YYYY', # HHDV 자격 연도 컬럼명
-    'HHDV_BYEAR_COL': 'BYEAR',        # HHDV 생년 컬럼명
-    'HHDV_SCHEMA': 'NHISBDA',         # HHDV_DSES_YY 조회 스키마
+    'HHDV_TABLE': 'HHDT_POPULATION_MM',  # 연령/자격 정보 테이블 (NHISBDA.HHDT_POPULATION_MM, 월단위)
+    'HHDV_STD_YYYY_COL': 'STD_YYYYMM',  # 월단위 기준컬럼 (YYYYMM 6자리, 앞 4자리=연도)
+    'HHDV_BYEAR_COL': 'BYEAR',           # 생년 컬럼명
+    'HHDV_SCHEMA': 'NHISBDA',            # HHDT_POPULATION_MM 조회 스키마
     'HHDV_GAIBJA_TYPES': ('1', '2', '5', '6', '7', '8'),  # 가입자 유형 필터
     'T20_SCHEMA': 'NHISBASE',         # CohortIDExtractor T20 조회 스키마
     # T20 진료내역 필터 (SAS 쿼리 기준)
     'T20_FORM_CD': ('02', '03', '07', '08', '09', '10', '11', '15'),  # 진료명세서 구분코드
     'T20_PAY_YN': '1',                # 급여구분 (1=급여)
-    # HHDV 단계 스킵 여부: True=T20 단독으로 코호트 ID 추출 (HHDV 접근 권한 없을 때)
-    'COHORT_USE_HHDV': False,
+    # HHDV 단계 스킵 여부: True=HHDT_POPULATION_MM 연령필터 활성화 (40~64세)
+    'COHORT_USE_HHDV': True,
     # ── 실제 HANA 테이블명 매핑 ─────────────────────────────────────────────
     # 내부 별칭(T20/T30/T40/T60)과 실제 HANA 테이블명이 다를 때 설정.
     'HANA_TABLE_MAP': {

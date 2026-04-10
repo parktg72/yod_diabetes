@@ -1028,7 +1028,7 @@ class CohortIDExtractor:
 
     흐름:
       ① 진입기간(ENROLLMENT_START~END) 모든 YYYYMM 순회
-      ② 각 월: HHDV_DSES_YY(연령조건) ∩ T20(E10~E14 상병조건) → 교집합을 set에 누적
+      ② 각 월: HHDT_POPULATION_MM(연령조건) ∩ T20(E10~E14 상병조건) → 교집합을 set에 누적
       ③ 전체 누적 set → cohort_ids.parquet 캐시 (resume 지원)
 
     Args:
@@ -1109,13 +1109,17 @@ class CohortIDExtractor:
         t20_int_where = t20_col_type is not None and 'INT' in t20_col_type.upper()
 
         # HHDV 사용 여부에 따른 연령 조건 설정
-        age_ids_by_year: dict = {}
+        # std_monthly=True: STD_YYYYMM(6자리) 월단위 테이블 → 월별 캐시
+        # std_monthly=False: STD_YYYY(4자리) 연단위 테이블 → 연도별 캐시
+        age_ids_cache: dict = {}
+        std_monthly: bool = False
         if use_hhdv:
             min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
             max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
-            hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSES_YY')
+            hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDT_POPULATION_MM')
             hhdv_table = _resolve_hana_table(hhdv_alias)
-            std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYY')
+            std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYYMM')
+            std_monthly = std_yyyy_col.upper().endswith('MM')
             byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
             hhdv_schema = STUDY_SETTINGS.get('HHDV_SCHEMA') or self.schema
             gaibja_types = STUDY_SETTINGS.get('HHDV_GAIBJA_TYPES', ('1', '2', '5', '6', '7', '8'))
@@ -1134,32 +1138,48 @@ class CohortIDExtractor:
 
             # ── 연령 조건: HHDV (use_hhdv=True일 때만) ────────────────────────
             if use_hhdv:
-                if year not in age_ids_by_year:
-                    age_where = (
-                        f"{std_yyyy_col} = '{year}' AND "
-                        f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
-                        f"BETWEEN {min_age} AND {max_age} AND "
-                        f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
-                        f"SEX_TYPE IN ('1', '2') AND "
-                        f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                        f"INDI_DSCM_NO < 90000000"
-                    )
-                    year_ids: set = set()
+                # 월단위 테이블(STD_YYYYMM): yyyymm별 캐시
+                # 연단위 테이블(STD_YYYY):   year별 캐시
+                cache_key = yyyymm if std_monthly else year
+                if cache_key not in age_ids_cache:
+                    if std_monthly:
+                        # HHDT_POPULATION_MM: STD_YYYYMM = '{yyyymm}', 나이 = SUBSTR(STD_YYYYMM,1,4) - BYEAR
+                        age_where = (
+                            f"{std_yyyy_col} = '{yyyymm}' AND "
+                            f"(CAST(SUBSTR({std_yyyy_col}, 1, 4) AS INT) - CAST({byear_col} AS INT)) "
+                            f"BETWEEN {min_age} AND {max_age} AND "
+                            f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
+                            f"SEX_TYPE IN ('1', '2') AND "
+                            f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
+                            f"INDI_DSCM_NO <= 99999999"
+                        )
+                    else:
+                        # HHDV_DSES_YY: STD_YYYY = '{year}', 나이 = STD_YYYY - BYEAR
+                        age_where = (
+                            f"{std_yyyy_col} = '{year}' AND "
+                            f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
+                            f"BETWEEN {min_age} AND {max_age} AND "
+                            f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
+                            f"SEX_TYPE IN ('1', '2') AND "
+                            f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
+                            f"INDI_DSCM_NO <= 99999999"
+                        )
+                    period_ids: set = set()
                     try:
                         for chunk_df in self.hana.fetch_table_chunked(
                             hhdv_table, hhdv_schema,
                             columns=['INDI_DSCM_NO'],
                             where_clause=age_where,
                         ):
-                            year_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
+                            period_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
                             del chunk_df
                             gc.collect()
                     except Exception as e:
-                        logger.warning("%s %s 조회 실패: %s", hhdv_table, year, e)
-                    age_ids_by_year[year] = year_ids
-                    logger.debug("%s %s: %d명 (연령+가입자유형 조건)", hhdv_table, year, len(year_ids))
+                        logger.warning("%s %s 조회 실패: %s", hhdv_table, cache_key, e)
+                    age_ids_cache[cache_key] = period_ids
+                    logger.debug("%s %s: %d명 (연령 %d~%d세 조건)", hhdv_table, cache_key, len(period_ids), min_age, max_age)
 
-                age_ids = age_ids_by_year[year]
+                age_ids = age_ids_cache[cache_key]
                 if not age_ids:
                     continue
 
@@ -1173,7 +1193,7 @@ class CohortIDExtractor:
                 f"PAY_YN = '{pay_yn}' AND "
                 f"FORM_CD IN ({form_cd_sql}) AND "
                 f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                f"INDI_DSCM_NO < 90000000 AND "
+                f"INDI_DSCM_NO <= 99999999 AND "
                 f"({sick_conditions})"
             )
 
@@ -1814,7 +1834,7 @@ class DataManager:
     def extract_cohort_ids(self, hana_schema, force=True, progress_callback=None):
         """진입기간 내 연령+DM 코드 조건 충족 INDI_DSCM_NO를 월별 추출해 frozenset 반환.
 
-        HHDV_DSES_YY(연령) ∩ T20(E10~E14 상병)을 진입기간 월별로 순회하며 누적.
+        HHDT_POPULATION_MM(연령) ∩ T20(E10~E14 상병)을 진입기간 월별로 순회하며 누적.
         결과는 cohort_ids.parquet으로 캐시되어 resume 모드에서 재사용된다.
         """
         if not self.hana:

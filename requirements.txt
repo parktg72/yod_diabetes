@@ -17,6 +17,7 @@ PyQt5>=5.15.10,<5.16
 # --- Data / DB ---
 duckdb>=1.0.0,<2.0.0
 pandas>=2.2.0,<3.0.0
+pyarrow>=14.0.0,<22.0.0
 numpy>=1.26.4,<2.1.0
 pyreadstat>=1.2.7
 openpyxl>=3.1.2,<4.0.0

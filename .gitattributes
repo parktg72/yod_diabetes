@@ -1,5 +1,5 @@
 # Windows 배치 파일은 항상 CRLF 줄바꿈 유지 (UTF-8 BOM으로 한글 지원)
-*.bat binary
+*.bat text eol=crlf
 *.cmd text eol=crlf
 
 # 소스 코드는 LF 통일

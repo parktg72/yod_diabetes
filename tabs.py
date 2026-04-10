@@ -262,7 +262,7 @@ class MemoryTab(QWidget):
             ('T30_TABLE',    'T30 실제 테이블명', table_map.get('T30', 'HBMT_TBGJME30')),
             ('T40_TABLE',    'T40 실제 테이블명', table_map.get('T40', 'HBMT_TBGJME40')),
             ('T60_TABLE',    'T60 실제 테이블명', table_map.get('T60', 'HBMT_TBGJME60')),
-            ('HHDV_TABLE',   'HHDV 실제 테이블명', STUDY_SETTINGS.get('HHDV_TABLE', 'HHDV_DSES_YY')),
+            ('HHDV_TABLE',   '자격 테이블명 (코호트ID추출용)', STUDY_SETTINGS.get('HHDV_TABLE', 'HHDT_POPULATION_MM')),
         ]
         self._hana_map_edits = {}
         for i, (key, label, val) in enumerate(mapping_defs):
@@ -287,7 +287,7 @@ class MemoryTab(QWidget):
         edits = self._hana_map_edits
         STUDY_SETTINGS['HHDV_SCHEMA'] = edits['HHDV_SCHEMA'].text().strip() or None
         STUDY_SETTINGS['T20_SCHEMA'] = edits['T20_SCHEMA'].text().strip() or None
-        STUDY_SETTINGS['HHDV_TABLE'] = edits['HHDV_TABLE'].text().strip() or 'HHDV_DSES_YY'
+        STUDY_SETTINGS['HHDV_TABLE'] = edits['HHDV_TABLE'].text().strip() or 'HHDT_POPULATION_MM'
         table_map = STUDY_SETTINGS.get('HANA_TABLE_MAP', {})
         for alias in ('T20', 'T30', 'T40', 'T60'):
             val = edits[f'{alias}_TABLE'].text().strip()
@@ -528,7 +528,7 @@ class DataLoadTab(QWidget):
         ly = QVBoxLayout(self)
 
         # ── 코호트 ID 추출 설정 (1단계) ──────────────────────────────────────
-        cg = QGroupBox("① 코호트 ID 추출 (HHDV_DSES_YY + T20, 진입기간 월별)")
+        cg = QGroupBox("① 코호트 ID 추출 (HHDT_POPULATION_MM + T20, 진입기간 월별)")
         cl = QGridLayout(cg)
 
         cl.addWidget(QLabel("HANA 스키마:"), 0, 0)
@@ -675,7 +675,7 @@ class DataLoadTab(QWidget):
 
     # --- actions ---
     def extract_cohort_ids(self):
-        """① 코호트 ID 추출 버튼 — HHDV_DSES_YY + T20에서 대상자 ID를 먼저 추출."""
+        """① 코호트 ID 추출 버튼 — HHDT_POPULATION_MM + T20에서 대상자 ID를 먼저 추출."""
         mw = self.ctx.main_window
         if mw._is_worker_running():
             return
