@@ -200,12 +200,9 @@ def _widen_decimal_columns(storage, table_name):
             "WHERE table_name = ?",
             [table_name],
         )
-    except Exception:
-        # DuckDB 버전에 따라 파라미터 바인딩 미지원 가능 — 직접 쿼리로 fallback
-        schema_df = storage.execute_df(
-            f"SELECT column_name, data_type, numeric_precision, numeric_scale "
-            f"FROM information_schema.columns WHERE table_name = '{table_name}'"
-        )
+    except Exception as exc:
+        logger.warning(f"_widen_decimal_columns: information_schema 조회 실패 — {exc}")
+        return
 
     for _, row in schema_df.iterrows():
         data_type_upper = str(row['data_type']).upper()
@@ -1807,7 +1804,7 @@ class DataManager:
         )
         for tname in tables['table_name']:
             _validate_table_name(tname)
-            self.storage.execute(f"DROP TABLE IF EXISTS {tname}")
+            self.storage.execute(f"DROP TABLE IF EXISTS {_quote_identifier(tname)}")
         self.loaded_tables.clear()
         self.exam_merger = ExamDataMerger(self.storage)
         logger.info("DuckDB 저장소 초기화 완료 (모든 테이블 삭제)")
