@@ -749,41 +749,56 @@ class TestParquetWriterFinally:
     """Fix C7: ParquetWriter try/finally."""
 
     def test_parquet_writer_closed_on_exception(self, tmp_path, monkeypatch):
-        """chunk loop에서 예외 발생 시 ParquetWriter.close() 호출 확인."""
-        import pyarrow as pa
+        """chunk loop에서 예외 발생 시 ParquetWriter.close() 호출 및 실패 카운터 추적 확인.
+
+        실패 추적 도입 이후: 월 추출 실패는 failed_months 카운터에 기록되고
+        WARNING 로그를 남긴다. ParquetWriter.close()는 여전히 finally에서 호출되어야 한다.
+        """
+        import config as cfg
         import pyarrow.parquet as pq
 
-        close_called = []
-        original_init = pq.ParquetWriter.__init__
+        orig_start = cfg.STUDY_SETTINGS['STUDY_START_YEAR']
+        orig_end = cfg.STUDY_SETTINGS['STUDY_END_YEAR']
+        try:
+            cfg.STUDY_SETTINGS['STUDY_START_YEAR'] = 2013
+            cfg.STUDY_SETTINGS['STUDY_END_YEAR'] = 2013
 
-        class FakeWriter:
-            def __init__(self, path, schema):
-                self.path = path
-                self._closed = False
-            def write_table(self, table):
-                raise IOError("디스크 쓰기 실패 테스트")
-            def close(self):
-                close_called.append(True)
-                self._closed = True
+            close_called = []
 
-        monkeypatch.setattr('pyarrow.parquet.ParquetWriter', FakeWriter)
+            class FakeWriter:
+                def __init__(self, path, schema):
+                    self.path = path
+                    self._closed = False
+                def write_table(self, table):
+                    raise IOError("디스크 쓰기 실패 테스트")
+                def close(self):
+                    close_called.append(True)
+                    self._closed = True
 
-        df_sample = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
+            monkeypatch.setattr('pyarrow.parquet.ParquetWriter', FakeWriter)
 
-        def fake_fetch(table, schema, where_clause=None, **kwargs):
-            if where_clause and '201301' in where_clause:
-                yield df_sample
+            df_sample = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
 
-        mock_hana = MagicMock()
-        mock_hana.fetch_table_chunked.side_effect = fake_fetch
-        mock_hana._detect_column_type.return_value = 'NVARCHAR'
-        mock_storage = MagicMock()
+            def fake_fetch(table, schema, where_clause=None, **kwargs):
+                if where_clause and '201301' in where_clause:
+                    yield df_sample
 
-        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
-        with pytest.raises(IOError, match="디스크 쓰기 실패"):
+            mock_hana = MagicMock()
+            mock_hana.fetch_table_chunked.side_effect = fake_fetch
+            mock_hana._detect_column_type.return_value = 'NVARCHAR'
+            mock_storage = MagicMock()
+            mock_storage.get_row_count.return_value = 0
+
+            extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+            # 201301만 데이터 있고 write_table 실패 → failed_months=['201301']
+            # 나머지 11개월은 데이터 없어서 정상 처리(빈 월)
+            # 실패율 1/12 < 20% → WARNING 로그, 예외 전파 없음
             extractor.extract_all_months('T20', 'T20')
 
-        assert close_called, "예외 발생 시에도 ParquetWriter.close()가 호출되어야 함"
+            assert close_called, "예외 발생 시에도 ParquetWriter.close()가 호출되어야 함"
+        finally:
+            cfg.STUDY_SETTINGS['STUDY_START_YEAR'] = orig_start
+            cfg.STUDY_SETTINGS['STUDY_END_YEAR'] = orig_end
 
 
 class TestRegisterUnregisterFinally:

@@ -539,6 +539,18 @@ class HANAConnector:
         1순위: PRIMARY KEY 컬럼
         2순위: 테이블 첫 번째 컬럼 (최소한 세션 내 결정적 순서 보장)
         """
+        order_key, _, _ = self._get_order_info(schema_name, table_name)
+        return order_key
+
+    def _get_order_info(self, schema_name, table_name):
+        """정렬 키 및 keyset 페이징 가능 여부 반환.
+
+        Returns:
+            (order_key_str, is_single_pk, pk_col_name)
+            - order_key_str: ORDER BY 절에 사용할 문자열
+            - is_single_pk: 단일 PK 컬럼인 경우 True (keyset 페이징 사용 가능)
+            - pk_col_name: 단일 PK일 때 컬럼 이름(따옴표 없음), 아니면 None
+        """
         cursor = self.conn.cursor()
         try:
             cursor.execute("""
@@ -548,7 +560,10 @@ class HANAConnector:
             """, (schema_name, table_name))
             pk_cols = [row[0] for row in cursor.fetchall()]
             if pk_cols:
-                return ', '.join(f'"{c}"' for c in pk_cols)
+                order_key = ', '.join(f'"{c}"' for c in pk_cols)
+                if len(pk_cols) == 1:
+                    return order_key, True, pk_cols[0]
+                return order_key, False, None
         except Exception:
             pass
         finally:
@@ -564,13 +579,13 @@ class HANAConnector:
             """, (schema_name, table_name))
             row = cursor.fetchone()
             if row:
-                return f'"{row[0]}"'
+                return f'"{row[0]}"', False, None
         except Exception:
             pass
         finally:
             cursor.close()
 
-        return '1'  # 최종 fallback
+        return '1', False, None  # 최종 fallback
 
     # -------------------------------------------------------
     # 데이터 적재
@@ -593,15 +608,17 @@ class HANAConnector:
 
     def fetch_table_chunked(self, table_name, schema_name, columns=None,
                             where_clause=None, chunk_size=None, distinct=False):
-        """서버 측 LIMIT/OFFSET 페이징으로 대용량 테이블 분할 조회.
+        """서버 측 페이징으로 대용량 테이블 분할 조회.
 
-        HANA의 search result size limit 초과를 방지하기 위해
-        한 번의 대형 SELECT 대신 LIMIT/OFFSET으로 분할 실행한다.
+        단일 PK + distinct=False 조건에서는 keyset(cursor-based) 페이징을 사용하여
+        OFFSET 증가에 따른 O(n²) 스캔 문제와 청크 경계에서의 행 중복/누락을 방지한다.
+        그 외에는 기존 LIMIT/OFFSET 페이징으로 fallback한다.
 
         Args:
             distinct: True 이면 SELECT DISTINCT를 사용해 HANA 측에서 중복 제거.
                       Python set()으로도 중복 제거되지만 distinct=True 시 전송량 절감.
                       DISTINCT 사용 시 ORDER BY는 첫 번째 선택 컬럼으로 고정.
+                      DISTINCT + keyset 조합은 복잡하므로 LIMIT/OFFSET 방식 유지.
         """
         if chunk_size is None:
             chunk_size = chunk_controller.get_chunk('hana')
@@ -611,13 +628,12 @@ class HANAConnector:
         select_prefix = 'SELECT DISTINCT' if distinct else 'SELECT'
         from_clause = f'"{schema_name}"."{table_name}"' if schema_name else f'"{table_name}"'
 
-        where_part = ''
         if where_clause:
             self._validate_where_clause(where_clause)
-            where_part = f' WHERE {where_clause}'
 
         # 컬럼 이름을 먼저 가져오기 (0건만 조회)
-        meta_query = f'{select_prefix} {col_str} FROM {from_clause}{where_part} LIMIT 0'
+        where_part_meta = f' WHERE {where_clause}' if where_clause else ''
+        meta_query = f'{select_prefix} {col_str} FROM {from_clause}{where_part_meta} LIMIT 0'
         cursor = self.conn.cursor()
         cursor.execute(meta_query)
         col_names = [desc[0] for desc in cursor.description]
@@ -628,56 +644,129 @@ class HANAConnector:
         if distinct:
             first_col = (columns[0] if columns else col_names[0])
             order_key = f'"{first_col}"'
+            use_keyset = False
+            pk_col_name = None
         else:
-            order_key = self._get_order_key(schema_name, table_name)
+            order_key, use_keyset, pk_col_name = self._get_order_info(schema_name, table_name)
 
-        # 서버 측 LIMIT/OFFSET 페이징
         total_rows = 0
-        offset = 0
 
-        while True:
-            paged_query = (
-                f'{select_prefix} {col_str} FROM {from_clause}{where_part}'
-                f' ORDER BY {order_key} LIMIT {chunk_size} OFFSET {offset}'
-            )
-
-            # 청크 단위 재시도 (최대 3회, 지수 백오프)
-            rows = None
-            for attempt in range(3):
-                cursor = self.conn.cursor()
-                try:
-                    cursor.execute(paged_query)
-                    rows = cursor.fetchall()
-                    cursor.close()
-                    break  # 성공
-                except Exception as e:
-                    cursor.close()
-                    if attempt < 2:
-                        logger.warning(
-                            f"HANA 청크 조회 실패 (시도 {attempt + 1}/3): {e}"
-                        )
-                        time.sleep(2 ** attempt)
-                        try:
-                            self.connect()
-                        except Exception:
-                            pass
+        if use_keyset:
+            # keyset(cursor-based) 페이징: WHERE pk > last_value ORDER BY pk LIMIT N
+            last_value = None
+            while True:
+                if last_value is None:
+                    # 첫 번째 페이지: keyset 조건 없음
+                    where_part = f' WHERE {where_clause}' if where_clause else ''
+                    paged_query = (
+                        f'{select_prefix} {col_str} FROM {from_clause}{where_part}'
+                        f' ORDER BY {order_key} LIMIT {chunk_size}'
+                    )
+                    bind_params = []
+                else:
+                    # 이후 페이지: last_value 이후부터 조회
+                    keyset_cond = f'{order_key} > ?'
+                    if where_clause:
+                        where_part = f' WHERE ({where_clause}) AND {keyset_cond}'
                     else:
-                        raise  # 마지막 시도 실패 — 예외 전파
+                        where_part = f' WHERE {keyset_cond}'
+                    paged_query = (
+                        f'{select_prefix} {col_str} FROM {from_clause}{where_part}'
+                        f' ORDER BY {order_key} LIMIT {chunk_size}'
+                    )
+                    bind_params = [last_value]
 
-            if not rows:
-                break
+                # 청크 단위 재시도 (최대 3회, 지수 백오프)
+                rows = None
+                for attempt in range(3):
+                    cursor = self.conn.cursor()
+                    try:
+                        if bind_params:
+                            cursor.execute(paged_query, bind_params)
+                        else:
+                            cursor.execute(paged_query)
+                        rows = cursor.fetchall()
+                        cursor.close()
+                        break  # 성공
+                    except Exception as e:
+                        cursor.close()
+                        if attempt < 2:
+                            logger.warning(
+                                f"HANA 청크 조회 실패 (시도 {attempt + 1}/3): {e}"
+                            )
+                            time.sleep(2 ** attempt)
+                            try:
+                                self.connect()
+                            except Exception:
+                                pass
+                        else:
+                            raise  # 마지막 시도 실패 — 예외 전파
 
-            chunk_df = pd.DataFrame(rows, columns=col_names)
-            fetched = len(chunk_df)
-            total_rows += fetched
-            offset += fetched
-            yield chunk_df
+                if not rows:
+                    break
 
-            # 마지막 페이지면 종료
-            if fetched < chunk_size:
-                break
+                chunk_df = pd.DataFrame(rows, columns=col_names)
+                fetched = len(chunk_df)
+                total_rows += fetched
 
-        logger.info(f"HANA {schema_name}.{table_name}: {total_rows:,}건 로드 (LIMIT/OFFSET 페이징)")
+                # order_key 컬럼의 마지막 값을 다음 keyset 커서로 사용
+                last_value = chunk_df[pk_col_name].iloc[-1]
+
+                yield chunk_df
+
+                # 마지막 페이지면 종료
+                if fetched < chunk_size:
+                    break
+
+            logger.info(f"HANA {schema_name}.{table_name}: {total_rows:,}건 로드 (keyset 페이징)")
+
+        else:
+            # 기존 LIMIT/OFFSET 페이징 (복합 PK / PK 없음 / distinct=True)
+            offset = 0
+            while True:
+                where_part = f' WHERE {where_clause}' if where_clause else ''
+                paged_query = (
+                    f'{select_prefix} {col_str} FROM {from_clause}{where_part}'
+                    f' ORDER BY {order_key} LIMIT {chunk_size} OFFSET {offset}'
+                )
+
+                # 청크 단위 재시도 (최대 3회, 지수 백오프)
+                rows = None
+                for attempt in range(3):
+                    cursor = self.conn.cursor()
+                    try:
+                        cursor.execute(paged_query)
+                        rows = cursor.fetchall()
+                        cursor.close()
+                        break  # 성공
+                    except Exception as e:
+                        cursor.close()
+                        if attempt < 2:
+                            logger.warning(
+                                f"HANA 청크 조회 실패 (시도 {attempt + 1}/3): {e}"
+                            )
+                            time.sleep(2 ** attempt)
+                            try:
+                                self.connect()
+                            except Exception:
+                                pass
+                        else:
+                            raise  # 마지막 시도 실패 — 예외 전파
+
+                if not rows:
+                    break
+
+                chunk_df = pd.DataFrame(rows, columns=col_names)
+                fetched = len(chunk_df)
+                total_rows += fetched
+                offset += fetched
+                yield chunk_df
+
+                # 마지막 페이지면 종료
+                if fetched < chunk_size:
+                    break
+
+            logger.info(f"HANA {schema_name}.{table_name}: {total_rows:,}건 로드 (LIMIT/OFFSET 페이징)")
 
     def load_table_to_duckdb(self, hana_table, hana_schema, duckdb_storage,
                               duckdb_table, columns=None, where_clause=None,
@@ -883,6 +972,8 @@ class MonthlyHanaExtractor:
                 table_name, _MONTHLY_FILTER_COL
             )
 
+        failed_months = []
+
         for idx, yyyymm in enumerate(months, 1):
             parquet_path = cache_dir / f'{table_upper}_{yyyymm}.parquet'
             tmp_path = cache_dir / f'{table_upper}_{yyyymm}.tmp.parquet'
@@ -915,25 +1006,32 @@ class MonthlyHanaExtractor:
             writer = None
             month_rows = 0
             try:
-                fetch_parts = id_parts if id_parts else [None]
-                for id_part in fetch_parts:
-                    where_clause = (
-                        f"{month_where} AND {id_part}" if id_part else month_where
+                try:
+                    fetch_parts = id_parts if id_parts else [None]
+                    for id_part in fetch_parts:
+                        where_clause = (
+                            f"{month_where} AND {id_part}" if id_part else month_where
+                        )
+                        for chunk_df in self.hana.fetch_table_chunked(
+                            table_name, self.schema,
+                            where_clause=where_clause
+                        ):
+                            chunk_df = _prepare_chunk_for_duckdb(chunk_df)
+                            arrow_table = pa.Table.from_pandas(chunk_df, preserve_index=False)
+                            if writer is None:
+                                writer = pq.ParquetWriter(str(tmp_path), arrow_table.schema)
+                                if schema_columns is None:
+                                    schema_columns = list(chunk_df.columns)
+                            writer.write_table(arrow_table)
+                            month_rows += len(chunk_df)
+                            del chunk_df, arrow_table
+                            gc.collect()
+                except Exception as month_exc:
+                    logger.warning(
+                        "%s %s 월 추출 실패: %s", table_upper, yyyymm, month_exc
                     )
-                    for chunk_df in self.hana.fetch_table_chunked(
-                        table_name, self.schema,
-                        where_clause=where_clause
-                    ):
-                        chunk_df = _prepare_chunk_for_duckdb(chunk_df)
-                        arrow_table = pa.Table.from_pandas(chunk_df, preserve_index=False)
-                        if writer is None:
-                            writer = pq.ParquetWriter(str(tmp_path), arrow_table.schema)
-                            if schema_columns is None:
-                                schema_columns = list(chunk_df.columns)
-                        writer.write_table(arrow_table)
-                        month_rows += len(chunk_df)
-                        del chunk_df, arrow_table
-                        gc.collect()
+                    failed_months.append(yyyymm)
+                    continue
             finally:
                 if writer is not None:
                     try:
@@ -941,7 +1039,6 @@ class MonthlyHanaExtractor:
                     except Exception as e:
                         logger.error("ParquetWriter close 실패 (%s %s): %s", table_upper, yyyymm, e)
                         tmp_path.unlink(missing_ok=True)
-                        raise
 
             if writer is None:
                 if schema_columns is None:
@@ -959,6 +1056,19 @@ class MonthlyHanaExtractor:
             tmp_path.replace(parquet_path)
             parquet_files.append(parquet_path)
             gc.collect()
+
+        if failed_months:
+            fail_rate = len(failed_months) / total
+            if fail_rate >= 0.2:  # 20% 이상 실패 시 ERROR
+                logger.error(
+                    "extract_all_months: %d/%d 월 추출 실패 (실패율 %.0f%%) — %s",
+                    len(failed_months), total, fail_rate * 100, failed_months
+                )
+            else:
+                logger.warning(
+                    "extract_all_months: %d/%d 월 추출 실패 — %s",
+                    len(failed_months), total, failed_months
+                )
 
         # Fix C5: 전체 0건 시 RuntimeError 발생 (빈 테이블 적재 방지)
         if schema_columns is None:
@@ -1141,22 +1251,27 @@ class CohortIDExtractor:
             _emit_progress(progress_callback, "[코호트ID] HHDV 단계 스킵 — NHISBASE.TBGJME20 단독 추출")
             logger.info("CohortIDExtractor: COHORT_USE_HHDV=False, T20 단독 모드")
 
-        for idx, yyyymm in enumerate(months, 1):
+        import threading
+        from concurrent.futures import ThreadPoolExecutor, as_completed
+
+        max_workers = int(STUDY_SETTINGS.get('COHORT_PARALLEL_WORKERS', 4))
+        cohort_lock = threading.Lock()
+        # 연단위 캐시(std_monthly=False): 같은 year의 여러 월이 동시에 접근 → Lock 필요
+        age_cache_lock = threading.Lock()
+        completed_count_ref = [0]  # mutable container for thread-safe counter
+
+        def _process_one_month(yyyymm):
+            """단일 월 처리: HHDV 연령 조건 + T20 상병 조건 → (yyyymm, result_ids) 반환."""
             year = yyyymm[:4]
-            _emit_progress(
-                progress_callback,
-                f"코호트 ID 추출 {yyyymm[:4]}-{yyyymm[4:]} ({idx}/{total}) "
-                f"누적 {len(cohort_set):,}명"
-            )
 
             # ── 연령 조건: HHDV (use_hhdv=True일 때만) ────────────────────────
             if use_hhdv:
-                # 월단위 테이블(STD_YYYYMM): yyyymm별 캐시
-                # 연단위 테이블(STD_YYYY):   year별 캐시
+                # 월단위(STD_YYYYMM): yyyymm 키 → 충돌 없음, Lock 불필요
+                # 연단위(STD_YYYY):   year 키  → 같은 year의 여러 월 동시 진입 → Lock 필요
                 cache_key = yyyymm if std_monthly else year
+
                 if cache_key not in age_ids_cache:
                     if std_monthly:
-                        # HHDT_POPULATION_MM: STD_YYYYMM = '{yyyymm}', 나이 = SUBSTR(STD_YYYYMM,1,4) - BYEAR
                         age_where = (
                             f"{std_yyyy_col} = '{yyyymm}' AND "
                             f"(CAST(SUBSTR({std_yyyy_col}, 1, 4) AS INT) - CAST({byear_col} AS INT)) "
@@ -1166,36 +1281,54 @@ class CohortIDExtractor:
                             f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
                             f"INDI_DSCM_NO <= 99999999"
                         )
+                        period_ids: set = set()
+                        try:
+                            for chunk_df in self.hana.fetch_table_chunked(
+                                hhdv_table, hhdv_schema,
+                                columns=['INDI_DSCM_NO'],
+                                where_clause=age_where,
+                                distinct=True,  # 동일 기간 내 동일 환자 중복 제거 (HANA 전송량 절감)
+                            ):
+                                period_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
+                                del chunk_df
+                                gc.collect()
+                        except Exception as e:
+                            logger.warning("%s %s 조회 실패: %s", hhdv_table, cache_key, e)
+                        # 월단위는 키 충돌 없으므로 Lock 없이 저장
+                        age_ids_cache[cache_key] = period_ids
+                        logger.debug("%s %s: %d명 (연령 %d~%d세 조건)", hhdv_table, cache_key, len(period_ids), min_age, max_age)
                     else:
-                        # HHDV_DSES_YY: STD_YYYY = '{year}', 나이 = STD_YYYY - BYEAR
-                        age_where = (
-                            f"{std_yyyy_col} = '{year}' AND "
-                            f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
-                            f"BETWEEN {min_age} AND {max_age} AND "
-                            f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
-                            f"SEX_TYPE IN ('1', '2') AND "
-                            f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                            f"INDI_DSCM_NO <= 99999999"
-                        )
-                    period_ids: set = set()
-                    try:
-                        for chunk_df in self.hana.fetch_table_chunked(
-                            hhdv_table, hhdv_schema,
-                            columns=['INDI_DSCM_NO'],
-                            where_clause=age_where,
-                            distinct=True,  # 동일 기간 내 동일 환자 중복 제거 (HANA 전송량 절감)
-                        ):
-                            period_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
-                            del chunk_df
-                            gc.collect()
-                    except Exception as e:
-                        logger.warning("%s %s 조회 실패: %s", hhdv_table, cache_key, e)
-                    age_ids_cache[cache_key] = period_ids
-                    logger.debug("%s %s: %d명 (연령 %d~%d세 조건)", hhdv_table, cache_key, len(period_ids), min_age, max_age)
+                        # 연단위: double-checked locking으로 중복 쿼리 방지
+                        with age_cache_lock:
+                            if cache_key not in age_ids_cache:
+                                age_where = (
+                                    f"{std_yyyy_col} = '{year}' AND "
+                                    f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
+                                    f"BETWEEN {min_age} AND {max_age} AND "
+                                    f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
+                                    f"SEX_TYPE IN ('1', '2') AND "
+                                    f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
+                                    f"INDI_DSCM_NO <= 99999999"
+                                )
+                                period_ids_y: set = set()
+                                try:
+                                    for chunk_df in self.hana.fetch_table_chunked(
+                                        hhdv_table, hhdv_schema,
+                                        columns=['INDI_DSCM_NO'],
+                                        where_clause=age_where,
+                                        distinct=True,  # 동일 기간 내 동일 환자 중복 제거 (HANA 전송량 절감)
+                                    ):
+                                        period_ids_y.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
+                                        del chunk_df
+                                        gc.collect()
+                                except Exception as e:
+                                    logger.warning("%s %s 조회 실패: %s", hhdv_table, cache_key, e)
+                                age_ids_cache[cache_key] = period_ids_y
+                                logger.debug("%s %s: %d명 (연령 %d~%d세 조건)", hhdv_table, cache_key, len(period_ids_y), min_age, max_age)
 
                 age_ids = age_ids_cache[cache_key]
                 if not age_ids:
-                    continue
+                    return yyyymm, set()
 
             # ── 상병 조건: T20 월별 MDCARE_STRT_YYYYMM 필터 ────────────────────
             if t20_int_where:
@@ -1225,20 +1358,47 @@ class CohortIDExtractor:
             except Exception as e:
                 logger.warning("T20 %s DM코드 조회 실패: %s", yyyymm, e)
 
-            # ── 누적: HHDV 사용 시 교집합, 미사용 시 T20 결과 직접 누적 ──────────
+            # ── 결과 계산: HHDV 사용 시 교집합, 미사용 시 T20 결과 직접 반환 ──
             if use_hhdv:
-                intersection = age_ids & month_dm_ids
-                cohort_set.update(intersection)
+                result_ids = age_ids & month_dm_ids
                 logger.debug(
-                    "%s: 연령 %d명, DM코드 %d명, 교집합 %d명 (누적 %d명)",
-                    yyyymm, len(age_ids), len(month_dm_ids), len(intersection), len(cohort_set)
+                    "%s: 연령 %d명, DM코드 %d명, 교집합 %d명",
+                    yyyymm, len(age_ids), len(month_dm_ids), len(result_ids)
                 )
             else:
-                cohort_set.update(month_dm_ids)
+                result_ids = month_dm_ids
                 logger.debug(
-                    "%s: DM코드 %d명 (누적 %d명, T20 단독)",
-                    yyyymm, len(month_dm_ids), len(cohort_set)
+                    "%s: DM코드 %d명 (T20 단독)",
+                    yyyymm, len(month_dm_ids)
                 )
+            return yyyymm, result_ids
+
+        # ── 병렬 실행: ThreadPoolExecutor (max_workers=COHORT_PARALLEL_WORKERS, 기본 4) ──
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            future_to_yyyymm = {
+                executor.submit(_process_one_month, yyyymm): yyyymm
+                for yyyymm in months
+            }
+            for future in as_completed(future_to_yyyymm):
+                yyyymm = future_to_yyyymm[future]
+                completed_count_ref[0] += 1
+                completed_count = completed_count_ref[0]
+                try:
+                    _, result_ids = future.result()
+                    with cohort_lock:
+                        cohort_set.update(result_ids)
+                        current_total = len(cohort_set)
+                    _emit_progress(
+                        progress_callback,
+                        f"코호트 ID 추출 {yyyymm[:4]}-{yyyymm[4:]} ({completed_count}/{total}) "
+                        f"누적 {current_total:,}명"
+                    )
+                except Exception as e:
+                    logger.warning("코호트 월 처리 실패 %s: %s — 해당 월 스킵", yyyymm, e)
+                    _emit_progress(
+                        progress_callback,
+                        f"코호트 ID 추출 {yyyymm[:4]}-{yyyymm[4:]} ({completed_count}/{total}) [오류 스킵]"
+                    )
 
         if not cohort_set:
             mode = "HHDV+T20" if use_hhdv else "T20(NHISBASE.TBGJME20) 단독"
