@@ -643,6 +643,145 @@ class HANAConnector:
             raise ValueError("WHERE 절에 세미콜론 사용 불가")
         return clause
 
+    def fetch_sql_keyset(self, base_sql, key_col, chunk_size=None):
+        """임의의 SELECT SQL을 key_col 기준 keyset(cursor-based) 페이징으로 청크 조회.
+
+        LIMIT/OFFSET 기반 `fetch_sql_chunked` 의 O(n²) 스캔 문제를 피하기 위한
+        최적 경로. base_sql을 서브쿼리로 감싸 `WHERE key_col > ?` 조건을 추가해
+        커서를 이동시킨다. DISTINCT/GROUP BY가 포함된 SQL에서도 안전하게 동작한다.
+
+        Args:
+            base_sql: ORDER BY / LIMIT / OFFSET 미포함 완전한 SELECT 문.
+                      SELECT 결과 컬럼 목록에 key_col 이 포함되어야 한다.
+            key_col:  정렬·커서 이동 기준 컬럼명(식별자, 따옴표 없이).
+                      반드시 단일 컬럼이어야 하며, 값은 정렬 가능해야 한다.
+                      **UNIQUE 필수** — `WHERE key_col > ?` 커서는 중복 키의
+                      두 번째 이후 행을 스킵한다. 호출자는 PK 컬럼(예: INDI_DSCM_NO)
+                      을 지정하거나 base_sql에 DISTINCT/GROUP BY 로 유일성을 보장해야 한다.
+            chunk_size: 청크당 최대 행 수 (None이면 기본값).
+
+        Yields: pandas.DataFrame
+        """
+        # DML/DDL 차단 — base_sql은 SELECT 전용이어야 함
+        if _READ_ONLY_FORBIDDEN.search(base_sql):
+            raise ValueError("fetch_sql_keyset: base_sql에 허용되지 않는 DML/DDL 구문 포함")
+        # 세미콜론으로 다중 구문 방지
+        if ';' in base_sql:
+            raise ValueError("fetch_sql_keyset: base_sql에 세미콜론 사용 불가")
+        # key_col 식별자 검증 (따옴표 없는 단일 식별자만 허용)
+        if not re.match(r'^[A-Za-z_][A-Za-z0-9_]*$', key_col):
+            raise ValueError(f"fetch_sql_keyset: 유효하지 않은 key_col: {key_col!r}")
+        if chunk_size is None:
+            chunk_size = chunk_controller.get_chunk('hana')
+        if not self.conn:
+            self.connect()
+
+        quoted_key = f'"{key_col}"'
+        total_rows = 0
+        last_value = None
+        col_names = None
+
+        while True:
+            if last_value is None:
+                paged = (
+                    f'SELECT * FROM ({base_sql}) _k '
+                    f'ORDER BY {quoted_key} '
+                    f'LIMIT {chunk_size}'
+                )
+                bind_params = None
+            else:
+                paged = (
+                    f'SELECT * FROM ({base_sql}) _k '
+                    f'WHERE {quoted_key} > ? '
+                    f'ORDER BY {quoted_key} '
+                    f'LIMIT {chunk_size}'
+                )
+                bind_params = [last_value]
+
+            # 청크 단위 재시도 (최대 3회, 지수 백오프)
+            rows = None
+            for attempt in range(3):
+                cursor = self.conn.cursor()
+                try:
+                    if bind_params is None:
+                        cursor.execute(paged)
+                    else:
+                        cursor.execute(paged, bind_params)
+                    if col_names is None:
+                        col_names = [d[0] for d in cursor.description]
+                    rows = cursor.fetchall()
+                    cursor.close()
+                    break
+                except Exception as e:
+                    cursor.close()
+                    if attempt < 2:
+                        logger.warning(
+                            f"HANA keyset 청크 조회 실패 (시도 {attempt + 1}/3): {e}"
+                        )
+                        time.sleep(2 ** attempt)
+                        try:
+                            self.connect()
+                        except Exception:
+                            pass
+                    else:
+                        raise
+
+            if not rows:
+                break
+
+            chunk_df = pd.DataFrame(rows, columns=col_names)
+            fetched = len(chunk_df)
+            total_rows += fetched
+
+            # key_col 컬럼의 마지막 값을 다음 페이지 커서로 사용
+            last_value = chunk_df[key_col].iloc[-1]
+
+            yield chunk_df
+
+            if fetched < chunk_size:
+                break
+
+        logger.info(f"HANA fetch_sql_keyset: {total_rows:,}건 로드 (key_col={key_col})")
+
+    def fetch_sql_chunked(self, base_sql, order_col, chunk_size=None):
+        """임의의 SELECT SQL을 LIMIT/OFFSET으로 청크 조회.
+
+        base_sql: ORDER BY / LIMIT / OFFSET 미포함 완전한 SELECT 문
+                  (JOIN, WHERE 등 모두 포함)
+        order_col: 페이징 안정성을 위한 ORDER BY 컬럼 (따옴표 포함 가능, e.g. '"INDI_DSCM_NO"')
+        chunk_size: 청크당 최대 행 수 (None이면 기본값)
+
+        Yields: pandas.DataFrame
+        """
+        # DML/DDL 차단 — base_sql은 SELECT 전용이어야 함
+        if _READ_ONLY_FORBIDDEN.search(base_sql):
+            raise ValueError("fetch_sql_chunked: base_sql에 허용되지 않는 DML/DDL 구문 포함")
+        # order_col 식별자 검증 (선택적 따옴표 포함)
+        if not re.match(r'^"?[A-Za-z_][A-Za-z0-9_]*"?$', order_col):
+            raise ValueError(f"fetch_sql_chunked: 유효하지 않은 order_col: {order_col!r}")
+        if chunk_size is None:
+            chunk_size = chunk_controller.get_chunk('hana')
+        if not self.conn:
+            self.connect()
+        offset = 0
+        col_names = None
+        while True:
+            paged = f"{base_sql} ORDER BY {order_col} LIMIT {chunk_size} OFFSET {offset}"
+            cursor = self.conn.cursor()
+            try:
+                cursor.execute(paged)
+                if col_names is None:
+                    col_names = [d[0] for d in cursor.description]
+                rows = cursor.fetchall()
+            finally:
+                cursor.close()
+            if not rows:
+                break
+            yield pd.DataFrame(rows, columns=col_names)
+            if len(rows) < chunk_size:
+                break
+            offset += chunk_size
+
     def fetch_table_chunked(self, table_name, schema_name, columns=None,
                             where_clause=None, chunk_size=None, distinct=False):
         """서버 측 페이징으로 대용량 테이블 분할 조회.
@@ -1013,6 +1152,27 @@ class MonthlyHanaExtractor:
 
         failed_months = []
 
+        # resume 모드: 기존 캐시 스키마 유효성 검사 (컬럼 수 < 5 이면 stale로 판단)
+        if not force:
+            existing_cache = sorted(cache_dir.glob(f'{table_upper}_*.parquet'))
+            if existing_cache:
+                try:
+                    first_schema = pq.read_schema(existing_cache[0])
+                    if len(first_schema.names) < 5:
+                        logger.warning(
+                            "%s 캐시 스키마 불량 (%d개 컬럼) — stale 캐시 전체 삭제 후 재추출합니다.",
+                            table_upper, len(first_schema.names)
+                        )
+                        for f in existing_cache:
+                            f.unlink()
+                except Exception as schema_e:
+                    logger.warning(
+                        "%s 캐시 스키마 읽기 실패 (%s) — stale 캐시 전체 삭제 후 재추출합니다.",
+                        table_upper, schema_e
+                    )
+                    for f in cache_dir.glob(f'{table_upper}_*.parquet'):
+                        f.unlink()
+
         for idx, yyyymm in enumerate(months, 1):
             parquet_path = cache_dir / f'{table_upper}_{yyyymm}.parquet'
             tmp_path = cache_dir / f'{table_upper}_{yyyymm}.tmp.parquet'
@@ -1187,6 +1347,152 @@ def _cohort_id_where_parts(cohort_ids):
     return parts
 
 
+def _build_cohort_id_sql(
+    enroll_start,
+    enroll_end,
+    *,
+    t20_schema,
+    t20_table,
+    t20_monthly_col='MDCARE_STRT_YYYYMM',
+    t20_monthly_is_int=False,
+    form_cd_list=('02', '03', '07', '08', '09', '10', '11', '15'),
+    pay_yn='1',
+    use_hhdv=True,
+    hhdv_schema=None,
+    hhdv_table=None,
+    hhdv_std_col='STD_YYYYMM',
+    hhdv_std_is_monthly=True,
+    hhdv_byear_col='BYEAR',
+    hhdv_gaibja_types=('1', '2', '5', '6', '7', '8'),
+    min_age=40,
+    max_age=64,
+):
+    """CohortIDExtractor용 단일 HANA SQL 빌더.
+
+    반환 SQL은 T20(DM 상병) × HHDV(연령·자격) 서버측 JOIN으로 진입기간 전체의
+    코호트 INDI_DSCM_NO 집합(DISTINCT)을 한 번에 산출한다. fetch_sql_keyset 과
+    조합되면 월별 LIMIT/OFFSET 스캔을 키셋 기반 단일 쿼리로 대체한다.
+
+    Args:
+        enroll_start / enroll_end: 진입기간 연도(포함).
+        t20_*: T20 스키마·테이블명과 MDCARE_STRT_YYYYMM 컬럼 타입(INT/VARCHAR).
+        form_cd_list / pay_yn: T20 청구 필터.
+        use_hhdv: True 면 HHDV 와 JOIN 하여 연령·자격 필터 적용.
+        hhdv_*: HHDV 스키마·테이블·컬럼명. hhdv_std_is_monthly=True 는 STD_YYYYMM(6자리),
+                False 는 STD_YYYY(4자리).
+        min_age / max_age: 연령 하한·상한(포함).
+
+    Returns:
+        str: ORDER BY / LIMIT 미포함 SELECT DISTINCT INDI_DSCM_NO SQL.
+
+    Notes:
+        - SICK_SYM1~5 의 DM 코드(E10~E14) 비교는 NULL/공백 안전한
+          ``LEFT(TRIM(col), 3) IN (...)`` 형태로 구성된다.
+        - 식별자는 모두 ``"``로 quote하여 예약어 충돌을 방지한다.
+    """
+    if int(enroll_start) > int(enroll_end):
+        raise ValueError(
+            f"enroll_start({enroll_start}) > enroll_end({enroll_end})"
+        )
+    # 식별자 검증 (_VALID_TABLE_RE와 동일 규칙)
+    for ident in (t20_schema, t20_table, t20_monthly_col, hhdv_byear_col,
+                  hhdv_std_col):
+        if ident and not _VALID_TABLE_RE.match(str(ident)):
+            raise ValueError(f"유효하지 않은 식별자: {ident!r}")
+    if use_hhdv:
+        for ident in (hhdv_schema, hhdv_table):
+            if ident and not _VALID_TABLE_RE.match(str(ident)):
+                raise ValueError(f"유효하지 않은 HHDV 식별자: {ident!r}")
+
+    month_lo = f"{int(enroll_start):04d}01"
+    month_hi = f"{int(enroll_end):04d}12"
+
+    # T20 월 경계 — 타입에 따라 리터럴 형태 결정
+    if t20_monthly_is_int:
+        month_clause = (
+            f't."{t20_monthly_col}" BETWEEN {int(month_lo)} AND {int(month_hi)}'
+        )
+    else:
+        month_clause = (
+            f't."{t20_monthly_col}" BETWEEN \'{month_lo}\' AND \'{month_hi}\''
+        )
+
+    form_cd_sql = ', '.join(f"'{c}'" for c in form_cd_list)
+    dm_codes_sql = ', '.join(f"'{c}'" for c in _DM_CODES)
+    sick_conditions = ' OR '.join(
+        f'LEFT(TRIM(t."{col}"), 3) IN ({dm_codes_sql})'
+        for col in _SICK_SYM_COLS
+    )
+
+    t20_where = (
+        f'{month_clause} '
+        f"AND t.\"PAY_YN\" = '{pay_yn}' "
+        f'AND t."FORM_CD" IN ({form_cd_sql}) '
+        f'AND t."INDI_DSCM_NO" <> 0 '
+        f'AND t."INDI_DSCM_NO" IS NOT NULL '
+        f'AND t."INDI_DSCM_NO" <= 99999999 '
+        f'AND ({sick_conditions})'
+    )
+
+    if not use_hhdv:
+        return (
+            f'SELECT DISTINCT t."INDI_DSCM_NO" AS "INDI_DSCM_NO" '
+            f'FROM "{t20_schema}"."{t20_table}" t '
+            f'WHERE {t20_where}'
+        )
+
+    # HHDV JOIN 구성 ----------------------------------------------------
+    gaibja_sql = ', '.join(f"'{t}'" for t in hhdv_gaibja_types)
+
+    # 월 경계 조건 — HHDV 측도 진입기간으로 압축(성능 힌트)
+    if hhdv_std_is_monthly:
+        hhdv_month_clause = (
+            f'a."{hhdv_std_col}" BETWEEN \'{month_lo}\' AND \'{month_hi}\''
+        )
+        age_year_expr = f'CAST(SUBSTR(a."{hhdv_std_col}", 1, 4) AS INT)'
+        join_on_month = (
+            f'a."{hhdv_std_col}" = t."{t20_monthly_col}"'
+        )
+    else:
+        year_lo = f"{int(enroll_start):04d}"
+        year_hi = f"{int(enroll_end):04d}"
+        hhdv_month_clause = (
+            f'a."{hhdv_std_col}" BETWEEN \'{year_lo}\' AND \'{year_hi}\''
+        )
+        age_year_expr = f'CAST(a."{hhdv_std_col}" AS INT)'
+        # 연단위 HHDV 와 월단위 T20 JOIN — 연도 substring 매칭
+        if t20_monthly_is_int:
+            join_on_month = (
+                f'a."{hhdv_std_col}" = '
+                f'SUBSTR(LPAD(CAST(t."{t20_monthly_col}" AS VARCHAR), 6, \'0\'), 1, 4)'
+            )
+        else:
+            join_on_month = (
+                f'a."{hhdv_std_col}" = SUBSTR(t."{t20_monthly_col}", 1, 4)'
+            )
+
+    age_range_expr = (
+        f'({age_year_expr} - CAST(a."{hhdv_byear_col}" AS INT)) '
+        f'BETWEEN {int(min_age)} AND {int(max_age)}'
+    )
+
+    return (
+        f'SELECT DISTINCT t."INDI_DSCM_NO" AS "INDI_DSCM_NO" '
+        f'FROM "{t20_schema}"."{t20_table}" t '
+        f'INNER JOIN "{hhdv_schema}"."{hhdv_table}" a '
+        f'ON {join_on_month} '
+        f'AND a."INDI_DSCM_NO" = t."INDI_DSCM_NO" '
+        f'WHERE {t20_where} '
+        f'AND {hhdv_month_clause} '
+        f'AND {age_range_expr} '
+        f'AND a."GAIBJA_TYPE" IN ({gaibja_sql}) '
+        f'AND a."SEX_TYPE" IN (\'1\', \'2\') '
+        f'AND a."INDI_DSCM_NO" <> 0 '
+        f'AND a."INDI_DSCM_NO" IS NOT NULL '
+        f'AND a."INDI_DSCM_NO" <= 99999999'
+    )
+
+
 class CohortIDExtractor:
     """진입기간 내 연령+DM 코드 조건 충족 INDI_DSCM_NO를 월별로 추출해 DISTINCT 집합 반환.
 
@@ -1230,8 +1536,36 @@ class CohortIDExtractor:
     def cache_path(self):
         return self.cache_root / 'cohort_ids.parquet'
 
+    def _run_single_sql(self, enroll_start, enroll_end, sql_kwargs,
+                        progress_callback=None, label=None):
+        """단일 SQL 실행 후 INDI_DSCM_NO set 반환 (keyset 페이징)."""
+        base_sql = _build_cohort_id_sql(
+            enroll_start=enroll_start,
+            enroll_end=enroll_end,
+            **sql_kwargs,
+        )
+        ids: set = set()
+        _emit_progress(
+            progress_callback,
+            f"코호트 ID 추출 중 ({label or f'{enroll_start}~{enroll_end}'})..."
+        )
+        for chunk_df in self.hana.fetch_sql_keyset(
+            base_sql, key_col='INDI_DSCM_NO',
+        ):
+            ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
+            del chunk_df
+            gc.collect()
+        return ids
+
     def extract(self, force=True, progress_callback=None):
-        """코호트 INDI_DSCM_NO를 월별 추출해 frozenset 반환.
+        """코호트 INDI_DSCM_NO를 단일 HANA SQL로 추출해 frozenset 반환.
+
+        흐름:
+          ① resume 모드(force=False) + 캐시 존재 → parquet 로드
+          ② `_build_cohort_id_sql` 로 HHDV × T20 서버측 JOIN SQL 구성
+          ③ `fetch_sql_keyset` 로 key 기반 페이징(최악의 경우에도 O(n))
+          ④ 전체 범위 실행 실패 시(OOM/timeout) 연단위 분할 fallback
+          ⑤ 결과를 cohort_ids.parquet 으로 저장
 
         Args:
             force: True → 기존 캐시 무시하고 재추출.
@@ -1254,205 +1588,116 @@ class CohortIDExtractor:
         from config import STUDY_SETTINGS
         use_hhdv = bool(STUDY_SETTINGS.get('COHORT_USE_HHDV', False))
         t20_schema = STUDY_SETTINGS.get('T20_SCHEMA') or self.schema
-
-        # T20 진료명세서 구분코드 필터
-        form_cd_list = STUDY_SETTINGS.get('T20_FORM_CD', ('02', '03', '07', '08', '09', '10', '11', '15'))
-        form_cd_sql = ', '.join(f"'{c}'" for c in form_cd_list)
+        form_cd_list = STUDY_SETTINGS.get(
+            'T20_FORM_CD', ('02', '03', '07', '08', '09', '10', '11', '15')
+        )
         pay_yn = STUDY_SETTINGS.get('T20_PAY_YN', '1')
 
-        months = self._enrollment_month_range()
-        total = len(months)
-        cohort_set = set()
+        enroll_start = int(STUDY_SETTINGS.get('ENROLLMENT_START', 2013))
+        enroll_end = int(STUDY_SETTINGS.get('ENROLLMENT_END', 2016))
+        if enroll_start > enroll_end:
+            raise ValueError(
+                f"ENROLLMENT_START({enroll_start}) > ENROLLMENT_END({enroll_end}): "
+                "config.py 설정을 확인하세요."
+            )
 
-        # T20 상병조건 SQL 조각: SICK_SYM1~5 × 3자리 PREFIX (SAS 쿼리 기준)
-        dm_codes_sql = ', '.join(f"'{c}'" for c in _DM_CODES)
-        sick_conditions = ' OR '.join(
-            f"SUBSTR(\"{col}\", 1, 3) IN ({dm_codes_sql})"
-            for col in _SICK_SYM_COLS
+        # T20 실제 HANA 테이블명 + 월 컬럼 타입 감지
+        t20_hana_table = _resolve_hana_table('T20')
+        t20_col_type = self.hana._detect_column_type(
+            t20_schema, t20_hana_table, _MONTHLY_FILTER_COL
+        )
+        t20_int_where = (
+            t20_col_type is not None and 'INT' in t20_col_type.upper()
         )
 
-        # T20 실제 HANA 테이블명 (HANA_TABLE_MAP 참조)
-        t20_hana_table = _resolve_hana_table('T20')
-        # T20 MDCARE_STRT_YYYYMM 컬럼 타입 (INT vs VARCHAR) — 루프 전 1회만 감지
-        t20_col_type = self.hana._detect_column_type(t20_schema, t20_hana_table, _MONTHLY_FILTER_COL)
-        t20_int_where = t20_col_type is not None and 'INT' in t20_col_type.upper()
+        # SQL 빌더 공통 kwargs
+        sql_kwargs = dict(
+            t20_schema=t20_schema,
+            t20_table=t20_hana_table,
+            t20_monthly_col=_MONTHLY_FILTER_COL,
+            t20_monthly_is_int=t20_int_where,
+            form_cd_list=tuple(form_cd_list),
+            pay_yn=pay_yn,
+            use_hhdv=use_hhdv,
+        )
 
-        # HHDV 사용 여부에 따른 연령 조건 설정
-        # std_monthly=True: STD_YYYYMM(6자리) 월단위 테이블 → 월별 캐시
-        # std_monthly=False: STD_YYYY(4자리) 연단위 테이블 → 연도별 캐시
-        age_ids_cache: dict = {}
-        std_monthly: bool = False
         if use_hhdv:
-            min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
-            max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
             hhdv_alias = STUDY_SETTINGS.get('HHDV_TABLE', 'HHDT_POPULATION_MM')
             hhdv_table = _resolve_hana_table(hhdv_alias)
             std_yyyy_col = STUDY_SETTINGS.get('HHDV_STD_YYYY_COL', 'STD_YYYYMM')
-            std_monthly = std_yyyy_col.upper().endswith('MM')
+            hhdv_std_is_monthly = std_yyyy_col.upper().endswith('MM')
             byear_col = STUDY_SETTINGS.get('HHDV_BYEAR_COL', 'BYEAR')
             hhdv_schema = STUDY_SETTINGS.get('HHDV_SCHEMA') or self.schema
-            gaibja_types = STUDY_SETTINGS.get('HHDV_GAIBJA_TYPES', ('1', '2', '5', '6', '7', '8'))
-            gaibja_sql = ', '.join(f"'{t}'" for t in gaibja_types)
+            gaibja_types = tuple(STUDY_SETTINGS.get(
+                'HHDV_GAIBJA_TYPES', ('1', '2', '5', '6', '7', '8'),
+            ))
+            min_age = int(STUDY_SETTINGS.get('MIN_AGE', 40))
+            max_age = int(STUDY_SETTINGS.get('MAX_AGE', 64))
+            sql_kwargs.update(
+                hhdv_schema=hhdv_schema,
+                hhdv_table=hhdv_table,
+                hhdv_std_col=std_yyyy_col,
+                hhdv_std_is_monthly=hhdv_std_is_monthly,
+                hhdv_byear_col=byear_col,
+                hhdv_gaibja_types=gaibja_types,
+                min_age=min_age,
+                max_age=max_age,
+            )
         else:
-            _emit_progress(progress_callback, "[코호트ID] HHDV 단계 스킵 — NHISBASE.TBGJME20 단독 추출")
+            _emit_progress(
+                progress_callback,
+                "[코호트ID] HHDV 단계 스킵 — NHISBASE.TBGJME20 단독 추출"
+            )
             logger.info("CohortIDExtractor: COHORT_USE_HHDV=False, T20 단독 모드")
 
-        import threading
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-
-        max_workers = int(STUDY_SETTINGS.get('COHORT_PARALLEL_WORKERS', 4))
-        cohort_lock = threading.Lock()
-        # 연단위 캐시(std_monthly=False): 같은 year의 여러 월이 동시에 접근 → Lock 필요
-        age_cache_lock = threading.Lock()
-        completed_count_ref = [0]  # mutable container for thread-safe counter
-
-        def _process_one_month(yyyymm):
-            """단일 월 처리: HHDV 연령 조건 + T20 상병 조건 → (yyyymm, result_ids) 반환."""
-            year = yyyymm[:4]
-
-            # ── 연령 조건: HHDV (use_hhdv=True일 때만) ────────────────────────
-            if use_hhdv:
-                # 월단위(STD_YYYYMM): yyyymm 키 → 충돌 없음, Lock 불필요
-                # 연단위(STD_YYYY):   year 키  → 같은 year의 여러 월 동시 진입 → Lock 필요
-                cache_key = yyyymm if std_monthly else year
-
-                if cache_key not in age_ids_cache:
-                    if std_monthly:
-                        age_where = (
-                            f"{std_yyyy_col} = '{yyyymm}' AND "
-                            f"(CAST(SUBSTR({std_yyyy_col}, 1, 4) AS INT) - CAST({byear_col} AS INT)) "
-                            f"BETWEEN {min_age} AND {max_age} AND "
-                            f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
-                            f"SEX_TYPE IN ('1', '2') AND "
-                            f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                            f"INDI_DSCM_NO <= 99999999"
-                        )
-                        period_ids: set = set()
-                        try:
-                            for chunk_df in self.hana.fetch_table_chunked(
-                                hhdv_table, hhdv_schema,
-                                columns=['INDI_DSCM_NO'],
-                                where_clause=age_where,
-                                distinct=True,  # 동일 기간 내 동일 환자 중복 제거 (HANA 전송량 절감)
-                            ):
-                                period_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
-                                del chunk_df
-                                gc.collect()
-                        except Exception as e:
-                            logger.warning("%s %s 조회 실패: %s", hhdv_table, cache_key, e)
-                        # 월단위: 각 스레드가 서로 다른 yyyymm 키를 처리하므로
-                        # 동일 키에 대한 동시 접근이 없어 Lock 불필요
-                        age_ids_cache[cache_key] = period_ids
-                        logger.debug("%s %s: %d명 (연령 %d~%d세 조건)", hhdv_table, cache_key, len(period_ids), min_age, max_age)
-                    else:
-                        # 연단위: double-checked locking으로 중복 쿼리 방지
-                        with age_cache_lock:
-                            if cache_key not in age_ids_cache:
-                                age_where = (
-                                    f"{std_yyyy_col} = '{year}' AND "
-                                    f"(CAST({std_yyyy_col} AS INT) - CAST({byear_col} AS INT)) "
-                                    f"BETWEEN {min_age} AND {max_age} AND "
-                                    f"GAIBJA_TYPE IN ({gaibja_sql}) AND "
-                                    f"SEX_TYPE IN ('1', '2') AND "
-                                    f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                                    f"INDI_DSCM_NO <= 99999999"
-                                )
-                                period_ids_y: set = set()
-                                try:
-                                    for chunk_df in self.hana.fetch_table_chunked(
-                                        hhdv_table, hhdv_schema,
-                                        columns=['INDI_DSCM_NO'],
-                                        where_clause=age_where,
-                                        distinct=True,  # 동일 기간 내 동일 환자 중복 제거 (HANA 전송량 절감)
-                                    ):
-                                        period_ids_y.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
-                                        del chunk_df
-                                        gc.collect()
-                                except Exception as e:
-                                    logger.warning("%s %s 조회 실패: %s", hhdv_table, cache_key, e)
-                                age_ids_cache[cache_key] = period_ids_y
-                                logger.debug("%s %s: %d명 (연령 %d~%d세 조건)", hhdv_table, cache_key, len(period_ids_y), min_age, max_age)
-
-                age_ids = age_ids_cache[cache_key]
-                if not age_ids:
-                    return yyyymm, set()
-
-            # ── 상병 조건: T20 월별 MDCARE_STRT_YYYYMM 필터 ────────────────────
-            if t20_int_where:
-                month_filter = f"{_MONTHLY_FILTER_COL} = {int(yyyymm)}"
-            else:
-                month_filter = f"{_MONTHLY_FILTER_COL} = '{yyyymm}'"
-            t20_where = (
-                f"{month_filter} AND "
-                f"PAY_YN = '{pay_yn}' AND "
-                f"FORM_CD IN ({form_cd_sql}) AND "
-                f"INDI_DSCM_NO <> 0 AND INDI_DSCM_NO IS NOT NULL AND "
-                f"INDI_DSCM_NO <= 99999999 AND "
-                f"({sick_conditions})"
+        # ── ① 전체 범위 단일 SQL ───────────────────────────────────────
+        cohort_set: set = set()
+        try:
+            cohort_set = self._run_single_sql(
+                enroll_start, enroll_end, sql_kwargs,
+                progress_callback=progress_callback,
+                label=f"{enroll_start}~{enroll_end} 전체",
             )
-
-            month_dm_ids: set = set()
-            try:
-                for chunk_df in self.hana.fetch_table_chunked(
-                    t20_hana_table, t20_schema,
-                    columns=['INDI_DSCM_NO'],
-                    where_clause=t20_where,
-                    distinct=True,  # 동일 월 내 동일 환자 중복 행 제거 (HANA 전송량 절감)
-                ):
-                    month_dm_ids.update(chunk_df['INDI_DSCM_NO'].astype(str).tolist())
-                    del chunk_df
-                    gc.collect()
-            except Exception as e:
-                logger.warning("T20 %s DM코드 조회 실패: %s", yyyymm, e)
-
-            # ── 결과 계산: HHDV 사용 시 교집합, 미사용 시 T20 결과 직접 반환 ──
-            if use_hhdv:
-                result_ids = age_ids & month_dm_ids
-                logger.debug(
-                    "%s: 연령 %d명, DM코드 %d명, 교집합 %d명",
-                    yyyymm, len(age_ids), len(month_dm_ids), len(result_ids)
-                )
-            else:
-                result_ids = month_dm_ids
-                logger.debug(
-                    "%s: DM코드 %d명 (T20 단독)",
-                    yyyymm, len(month_dm_ids)
-                )
-            return yyyymm, result_ids
-
-        # ── 병렬 실행: ThreadPoolExecutor (max_workers=COHORT_PARALLEL_WORKERS, 기본 4) ──
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            future_to_yyyymm = {
-                executor.submit(_process_one_month, yyyymm): yyyymm
-                for yyyymm in months
-            }
-            for future in as_completed(future_to_yyyymm):
-                yyyymm = future_to_yyyymm[future]
-                completed_count_ref[0] += 1
-                completed_count = completed_count_ref[0]
+        except Exception as exc:
+            # ── ② 연단위 분할 fallback ─────────────────────────────────
+            if enroll_end - enroll_start < 1:
+                # 단년도인데도 실패 → 전파
+                raise
+            logger.warning(
+                "CohortIDExtractor: 전체 범위 단일 SQL 실패(%s) — 연단위 분할 fallback 전환",
+                exc,
+            )
+            _emit_progress(
+                progress_callback,
+                "전체 범위 실행 실패 — 연단위 분할로 재시도합니다."
+            )
+            for year in range(enroll_start, enroll_end + 1):
                 try:
-                    _, result_ids = future.result()
-                    with cohort_lock:
-                        cohort_set.update(result_ids)
-                        current_total = len(cohort_set)
-                    _emit_progress(
-                        progress_callback,
-                        f"코호트 ID 추출 {yyyymm[:4]}-{yyyymm[4:]} ({completed_count}/{total}) "
-                        f"누적 {current_total:,}명"
+                    year_ids = self._run_single_sql(
+                        year, year, sql_kwargs,
+                        progress_callback=progress_callback,
+                        label=f"{year}년",
                     )
-                except Exception as e:
-                    logger.warning("코호트 월 처리 실패 %s: %s — 해당 월 스킵", yyyymm, e)
+                    cohort_set.update(year_ids)
                     _emit_progress(
                         progress_callback,
-                        f"코호트 ID 추출 {yyyymm[:4]}-{yyyymm[4:]} ({completed_count}/{total}) [오류 스킵]"
+                        f"코호트 ID 추출 {year}년 완료 — 누적 {len(cohort_set):,}명"
+                    )
+                except Exception as year_exc:
+                    logger.warning(
+                        "CohortIDExtractor: %d년 분할 추출 실패: %s — 해당 연도 스킵",
+                        year, year_exc,
+                    )
+                    _emit_progress(
+                        progress_callback,
+                        f"코호트 ID 추출 {year}년 [오류 스킵]"
                     )
 
         if not cohort_set:
             mode = "HHDV+T20" if use_hhdv else "T20(NHISBASE.TBGJME20) 단독"
             raise RuntimeError(
                 f"CohortIDExtractor: 조건을 만족하는 환자가 없습니다. [{mode} 모드]\n"
-                f"진입기간({STUDY_SETTINGS.get('ENROLLMENT_START')}~"
-                f"{STUDY_SETTINGS.get('ENROLLMENT_END')}), "
+                f"진입기간({enroll_start}~{enroll_end}), "
                 f"T20 스키마({t20_schema}), 테이블({t20_hana_table}) 접근 권한을 확인하세요."
             )
 
@@ -1734,6 +1979,248 @@ class SASFileLoader:
 
         logger.info(f"다중 파일 병합 완료: {table_name} ({grand_total:,}건, {len(file_paths)}개 파일)")
         return grand_total
+
+
+class MonthlyJKExtractor:
+    """JK 자격DB 월별 분할 추출 — HHDT_POPULATION_MM + HHDT_DSES_YY BFC 패턴 조인.
+
+    BFC_MONTHLY SAS 매크로와 동일한 로직:
+      - HHDT_POPULATION_MM : 월별 자격 (STD_YYYYMM, SEX_TYPE, BYEAR, GAIBJA_TYPE, RVSN_ADDR_CD)
+      - HHDT_DSES_YY       : 연별 소득/재산 (FOREIGNER_Y, SES05, CALC_CTRB_VTILE_FD, SURV_YR)
+    결과 JK 테이블 보장 컬럼:
+      STD_YYYYMM, STD_YYYY(파생), INDI_DSCM_NO, SEX_TYPE, BYEAR, GAIBJA_TYPE,
+      RVSN_ADDR_CD, FOREIGNER_Y, SES05, CALC_CTRB_VTILE_FD, SURV_YR
+    cohort_builder 호환: STD_YYYY(4자리), SURV_YR, HHDT_DEATH(NULL)
+
+    Args:
+        hana_connector: HANAConnector 인스턴스
+        duckdb_storage: DuckDBStorage 인스턴스
+        cache_root: Parquet 캐시 루트 (예: Path('/app/hana_cache'))
+        pop_schema: HHDT_POPULATION_MM 스키마
+        pop_table: 월별 자격 테이블명 (기본 'HHDT_POPULATION_MM')
+        dses_schema: HHDT_DSES_YY 스키마
+        dses_table: 연별 소득/재산 테이블명 (기본 'HHDT_DSES_YY')
+    """
+
+    def __init__(self, hana_connector, duckdb_storage, cache_root,
+                 pop_schema='NHISBDA', pop_table='HHDT_POPULATION_MM',
+                 dses_schema='NHISBDA', dses_table='HHDT_DSES_YY'):
+        # 식별자 검증 — UI/설정에서 주입되는 schema/table 이름으로 인한 SQL 인젝션 차단.
+        # _build_join_sql 이 f-string 으로 직접 삽입하므로 여기서 정규식으로 보증.
+        for _label, _ident in (
+            ('pop_schema', pop_schema), ('pop_table', pop_table),
+            ('dses_schema', dses_schema), ('dses_table', dses_table),
+        ):
+            if not _VALID_TABLE_RE.match(str(_ident)):
+                raise ValueError(
+                    f"MonthlyJKExtractor: 유효하지 않은 {_label} 식별자: {_ident!r}"
+                )
+        self.hana = hana_connector
+        self.storage = duckdb_storage
+        self.cache_root = Path(cache_root)
+        self.pop_schema = pop_schema
+        self.pop_table = pop_table
+        self.dses_schema = dses_schema
+        self.dses_table = dses_table
+
+    def _month_range(self):
+        """STUDY_SETTINGS 기반 YYYYMM 목록 반환."""
+        from config import STUDY_SETTINGS
+        sy = int(STUDY_SETTINGS['STUDY_START_YEAR'])
+        ey = int(STUDY_SETTINGS['STUDY_END_YEAR'])
+        months = []
+        for y in range(sy, ey + 1):
+            for m in range(1, 13):
+                months.append(f"{y}{m:02d}")
+        return months
+
+    def _build_join_sql(self, yyyymm, cohort_ids=None):
+        """월별 JK JOIN SQL 생성 (ORDER BY / LIMIT / OFFSET 미포함)."""
+        if not re.match(r'^\d{6}$', str(yyyymm)):
+            raise ValueError(f"_build_join_sql: 유효하지 않은 yyyymm: {yyyymm!r}")
+        pop = f'"{self.pop_schema}"."{self.pop_table}"'
+        dses = f'"{self.dses_schema}"."{self.dses_table}"'
+        base_cond = (
+            f"B.STD_YYYYMM = '{yyyymm}' "
+            f"AND B.INDI_DSCM_NO <> 0 "
+            f"AND B.INDI_DSCM_NO IS NOT NULL "
+            f"AND B.INDI_DSCM_NO < 90000000"
+        )
+        id_parts = _cohort_id_where_parts(cohort_ids)
+        if id_parts:
+            cohort_cond = ' AND '.join(f"B.{p}" for p in id_parts)
+            where_clause = f"{base_cond} AND ({cohort_cond})"
+        else:
+            where_clause = base_cond
+
+        sql = f"""
+SELECT
+    B.STD_YYYYMM,
+    SUBSTR(CAST(B.STD_YYYYMM AS VARCHAR), 1, 4)           AS STD_YYYY,
+    CAST(B.INDI_DSCM_NO AS VARCHAR(34))                    AS INDI_DSCM_NO,
+    B.SEX_TYPE,
+    B.BYEAR,
+    B.GAIBJA_TYPE,
+    SUBSTR(COALESCE(B.RVSN_ADDR_CD, ''), 1, 5)             AS RVSN_ADDR_CD,
+    C.FOREIGNER_Y,
+    C.SES05,
+    CAST(C.CALC_CTRB_VTILE_FD AS VARCHAR(10))              AS CALC_CTRB_VTILE_FD,
+    CAST(C.SURV_YR AS INTEGER)                             AS SURV_YR,
+    NULL                                                   AS HHDT_DEATH
+FROM {pop} B
+INNER JOIN {dses} C
+    ON  B.INDI_DSCM_NO = C.INDI_DSCM_NO
+    AND C.STD_YYYY = SUBSTR(CAST(B.STD_YYYYMM AS VARCHAR), 1, 4)
+WHERE {where_clause}
+""".strip()
+        return sql
+
+    def extract_all_months(self, force=False, cohort_ids=None, progress_callback=None):
+        """전 기간 월별 JK 추출 → Parquet 캐시 → DuckDB JK 테이블 병합.
+
+        Args:
+            force: True이면 기존 캐시 무시 후 재추출
+            cohort_ids: frozenset[str] 또는 None (None이면 전체 추출)
+            progress_callback: 진행 상태 콜백
+        Returns:
+            총 로드 행 수 (int)
+        """
+        import pyarrow.parquet as pq
+
+        import pyarrow as pa
+        import pyarrow.parquet as pq
+
+        # 빈 월 parquet용 명시적 스키마 — union_by_name 타입 추론 오류 방지
+        _JK_PA_SCHEMA = pa.schema([
+            pa.field('STD_YYYYMM', pa.string()),
+            pa.field('STD_YYYY', pa.string()),
+            pa.field('INDI_DSCM_NO', pa.string()),
+            pa.field('SEX_TYPE', pa.string()),
+            pa.field('BYEAR', pa.string()),
+            pa.field('GAIBJA_TYPE', pa.string()),
+            pa.field('RVSN_ADDR_CD', pa.string()),
+            pa.field('FOREIGNER_Y', pa.string()),
+            pa.field('SES05', pa.string()),
+            pa.field('CALC_CTRB_VTILE_FD', pa.string()),
+            pa.field('SURV_YR', pa.int64()),
+            pa.field('HHDT_DEATH', pa.string()),
+        ])
+
+        cache_dir = self.cache_root / 'JK'
+        cache_dir.mkdir(parents=True, exist_ok=True)
+
+        if force:
+            for f in cache_dir.glob('JK_*.parquet'):
+                f.unlink()
+        else:
+            for f in cache_dir.glob('JK_*.tmp.parquet'):
+                f.unlink()
+
+        # resume 모드: 기존 캐시 스키마 유효성 검사 (컬럼 수 < 5 이면 stale)
+        if not force:
+            existing = sorted(cache_dir.glob('JK_*.parquet'))
+            if existing:
+                try:
+                    first_schema = pq.read_schema(existing[0])
+                    if len(first_schema.names) < 5:
+                        logger.warning(
+                            "JK 캐시 스키마 불량 (%d개 컬럼) — stale 캐시 전체 삭제 후 재추출합니다.",
+                            len(first_schema.names)
+                        )
+                        for f in existing:
+                            f.unlink()
+                except Exception as schema_e:
+                    logger.warning("JK 캐시 스키마 읽기 실패 (%s) — 전체 재추출합니다.", schema_e)
+                    for f in cache_dir.glob('JK_*.parquet'):
+                        f.unlink()
+
+        months = self._month_range()
+        total = len(months)
+        parquet_files = []
+        failed_months = []
+        consecutive_failures = 0
+        _MAX_CONSECUTIVE_FAILURES = 3
+
+        for idx, yyyymm in enumerate(months, 1):
+            parquet_path = cache_dir / f'JK_{yyyymm}.parquet'
+            tmp_path = cache_dir / f'JK_{yyyymm}.tmp.parquet'
+
+            if not force and parquet_path.exists() and parquet_path.stat().st_size > 0:
+                parquet_files.append(parquet_path)
+                consecutive_failures = 0
+                _emit_progress(
+                    progress_callback,
+                    f"JK {yyyymm[:4]}-{yyyymm[4:]} 캐시 사용 ({idx}/{total})"
+                )
+                continue
+
+            _emit_progress(
+                progress_callback,
+                f"JK {yyyymm[:4]}-{yyyymm[4:]} 추출 중 ({idx}/{total})"
+            )
+
+            try:
+                base_sql = self._build_join_sql(yyyymm, cohort_ids=cohort_ids)
+                chunks = []
+                for chunk_df in self.hana.fetch_sql_chunked(base_sql, '"INDI_DSCM_NO"'):
+                    chunk_df = _prepare_chunk_for_duckdb(chunk_df)
+                    chunks.append(chunk_df)
+
+                if chunks:
+                    combined = pd.concat(chunks, ignore_index=True)
+                    table = pa.Table.from_pandas(combined, preserve_index=False)
+                    pq.write_table(table, str(tmp_path))
+                    tmp_path.rename(parquet_path)
+                    parquet_files.append(parquet_path)
+                    consecutive_failures = 0
+                    logger.debug("JK %s: %d행 저장", yyyymm, len(combined))
+                else:
+                    # 해당 월 데이터 없음 → 명시적 스키마 빈 parquet 저장 (resume 스킵용)
+                    empty_table = pa.table(
+                        {f.name: pa.array([], type=f.type) for f in _JK_PA_SCHEMA},
+                        schema=_JK_PA_SCHEMA,
+                    )
+                    pq.write_table(empty_table, str(parquet_path))
+                    parquet_files.append(parquet_path)
+                    consecutive_failures = 0
+                    logger.debug("JK %s: 데이터 없음 (빈 parquet)", yyyymm)
+
+            except Exception as e:
+                logger.warning("JK %s 추출 실패: %s — 건너뜁니다.", yyyymm, e)
+                failed_months.append(yyyymm)
+                consecutive_failures += 1
+                if tmp_path.exists():
+                    tmp_path.unlink()
+                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    raise RuntimeError(
+                        f"JK 추출: {_MAX_CONSECUTIVE_FAILURES}개월 연속 실패 — HANA 연결 또는 테이블 설정을 확인하세요. "
+                        f"마지막 오류: {e}"
+                    ) from e
+
+        if failed_months:
+            logger.warning("JK 추출 실패 월 (%d개): %s", len(failed_months), failed_months)
+
+        if not parquet_files:
+            raise RuntimeError("JK: 유효한 Parquet 파일이 없습니다. HANA 연결 및 테이블 설정을 확인하세요.")
+
+        # DuckDB JK 테이블 병합
+        _emit_progress(progress_callback, "JK DuckDB 병합 중...")
+        self.storage.drop_table('JK')
+        pq_list = [str(p) for p in sorted(parquet_files)]
+        self.storage.execute(
+            f"CREATE TABLE JK AS SELECT * FROM read_parquet({pq_list!r}, union_by_name=true)"
+        )
+        total_rows = self.storage.get_row_count('JK')
+
+        _create_indexes_with_progress(
+            self.storage, 'JK',
+            [['INDI_DSCM_NO', 'STD_YYYY'], ['STD_YYYYMM']],
+            progress_callback=progress_callback
+        )
+
+        logger.info("JK 월별 추출 완료: %d행, 실패 월 %d개", total_rows, len(failed_months))
+        _emit_progress(progress_callback, f"JK 완료: {total_rows:,}행")
+        return total_rows
 
 
 class ExamDataMerger:

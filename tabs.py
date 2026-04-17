@@ -613,12 +613,21 @@ class DataLoadTab(QWidget):
         for i, (tname, tlabel) in enumerate(tables):
             fl.addWidget(QLabel(tlabel), i, 0)
             combo = QComboBox()
-            combo.addItems(['HANA DB', 'SAS 파일', 'CSV 파일', '(미사용)'])
-            combo.setCurrentIndex(3)  # 기본: 미사용
+            if tname == 'JK':
+                combo.addItems(['HANA 월별 (BFC)', 'HANA DB', 'SAS 파일', 'CSV 파일', '(미사용)'])
+                combo.setCurrentIndex(4)  # 기본: 미사용
+            else:
+                combo.addItems(['HANA DB', 'SAS 파일', 'CSV 파일', '(미사용)'])
+                combo.setCurrentIndex(3)  # 기본: 미사용
             fl.addWidget(combo, i, 1)
 
             path_edit = QLineEdit()
-            path_edit.setPlaceholderText("HANA 테이블명 또는 파일경로 (분할파일: 세미콜론 구분)")
+            if tname == 'JK':
+                path_edit.setPlaceholderText(
+                    "HANA 월별: NHISBDA (스키마명) | HANA DB: SCHEMA.TABLE | 파일경로"
+                )
+            else:
+                path_edit.setPlaceholderText("HANA 테이블명 또는 파일경로 (분할파일: 세미콜론 구분)")
             fl.addWidget(path_edit, i, 2)
 
             btn = QPushButton("...")
@@ -762,7 +771,11 @@ class DataLoadTab(QWidget):
             path = inp['path'].text().strip()
             if not path or src == '(미사용)':
                 continue
-            if src == 'HANA DB':
+            if src == 'HANA 월별 (BFC)':
+                # JK 전용: HHDT_POPULATION_MM + HHDT_DSES_YY 월별 조인 추출
+                # path = 스키마명 오버라이드 (예: 'NHISBDA') 또는 빈 문자열(config 기본값 사용)
+                load_cfg[tname] = {'type': 'hana_monthly_jk', 'schema_override': path}
+            elif src == 'HANA DB':
                 if '.' in path:
                     hana_schema, hana_table = path.split('.', 1)
                 else:
@@ -805,7 +818,31 @@ class DataLoadTab(QWidget):
                 if progress_callback:
                     progress_callback(f"{tn} 로드 중...")
                 try:
-                    if src['type'] == 'hana':
+                    if src['type'] == 'hana_monthly_jk':
+                        from db_connector import MonthlyJKExtractor, _get_hana_cache_dir
+                        if not dm.hana or not dm.hana.conn:
+                            dm.connect_hana(hana_host, int(hana_port),
+                                             hana_user, hana_pass)
+                        schema_override = src.get('schema_override') or ''
+                        # schema_override는 UI에서 단일 스키마를 입력했을 때 사용
+                        # 두 테이블이 다른 스키마에 있으면 STUDY_SETTINGS로 개별 설정
+                        pop_schema = schema_override or STUDY_SETTINGS.get('JK_POPULATION_SCHEMA', 'NHISBDA')
+                        dses_schema = STUDY_SETTINGS.get('JK_DSES_SCHEMA', schema_override or 'NHISBDA')
+                        extractor = MonthlyJKExtractor(
+                            hana_connector=dm.hana,
+                            duckdb_storage=dm.storage,
+                            cache_root=_get_hana_cache_dir(),
+                            pop_schema=pop_schema,
+                            pop_table=STUDY_SETTINGS.get('JK_POPULATION_TABLE', 'HHDT_POPULATION_MM'),
+                            dses_schema=dses_schema,
+                            dses_table=STUDY_SETTINGS.get('JK_DSES_TABLE', 'HHDT_DSES_YY'),
+                        )
+                        cnt = extractor.extract_all_months(
+                            force=force_extract,
+                            cohort_ids=cohort_ids,
+                            progress_callback=progress_callback,
+                        )
+                    elif src['type'] == 'hana':
                         if not dm.hana or not dm.hana.conn:
                             dm.connect_hana(hana_host, int(hana_port),
                                              hana_user, hana_pass)

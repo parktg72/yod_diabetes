@@ -231,6 +231,14 @@ STUDY_SETTINGS = {
     'AGE65_CENSOR_MONTH': '0101',     # 65세 censoring 기준월일 (MMDD). 기본='0101'(1월1일).
                                       # 생년월일 미보유로 인해 최대 ~11개월 조기 censoring 발생.
                                       # 민감도 분석: '0701'(7월1일)로 변경하면 평균 편향 최소화.
+    # ── JK 자격DB HANA 월별 추출 설정 (MonthlyJKExtractor) ─────────────────
+    # JK_SOURCE='hana_monthly': HHDT_POPULATION_MM + HHDT_DSES_YY BFC 패턴 조인
+    # JK_SOURCE='local': 기존 SAS/CSV 파일 로드 (HHDV_DSES_YY 레이아웃)
+    'JK_SOURCE': 'local',             # 'local' | 'hana_monthly'
+    'JK_DSES_TABLE': 'HHDT_DSES_YY', # HANA 연별 소득/재산 테이블
+    'JK_DSES_SCHEMA': 'NHISBDA',      # 연별 소득/재산 스키마
+    'JK_POPULATION_TABLE': 'HHDT_POPULATION_MM',  # HANA 월별 자격 테이블
+    'JK_POPULATION_SCHEMA': 'NHISBDA',             # 월별 자격 스키마
 }
 
 DUCKDB_SETTINGS = {
@@ -265,8 +273,37 @@ def _validate_study_settings():
         errors.append(f"MIN_AGE({s['MIN_AGE']}) >= MAX_AGE({s['MAX_AGE']})")
 
     # 연도 범위
-    if s['STUDY_START_YEAR'] > s['STUDY_END_YEAR']:
-        errors.append(f"STUDY_START_YEAR({s['STUDY_START_YEAR']}) > STUDY_END_YEAR({s['STUDY_END_YEAR']})")
+    sy, ey = s['STUDY_START_YEAR'], s['STUDY_END_YEAR']
+    if sy > ey:
+        errors.append(f"STUDY_START_YEAR({sy}) > STUDY_END_YEAR({ey})")
+
+    # 진입기간이 연구기간 내에 있어야 함
+    es, ee = s.get('ENROLLMENT_START', sy), s.get('ENROLLMENT_END', ey)
+    if not (sy <= es <= ee <= ey):
+        errors.append(
+            f"ENROLLMENT_START({es})~ENROLLMENT_END({ee})이 "
+            f"STUDY_START_YEAR({sy})~STUDY_END_YEAR({ey}) 범위를 벗어납니다"
+        )
+
+    # AGE65_CENSOR_MONTH 포맷 검증 (MMDD 4자리 숫자)
+    import re as _re
+    censor_month = s.get('AGE65_CENSOR_MONTH', '0101')
+    if not _re.match(r'^\d{4}$', str(censor_month)):
+        errors.append(f"AGE65_CENSOR_MONTH={censor_month!r} — MMDD 4자리 숫자여야 합니다 (예: '0101')")
+
+    # INPATIENT_FORM_CD 형식 검증
+    inpt = s.get('INPATIENT_FORM_CD', '02')
+    if not _re.match(r'^\d{2}$', str(inpt)):
+        errors.append(f"INPATIENT_FORM_CD={inpt!r} — 2자리 숫자 코드여야 합니다 (예: '02')")
+
+    # JK 소스 설정 검증
+    jk_source = s.get('JK_SOURCE', 'local')
+    if jk_source not in ('local', 'hana_monthly'):
+        errors.append(f"JK_SOURCE={jk_source!r} — 'local' 또는 'hana_monthly' 이어야 합니다")
+    if jk_source == 'hana_monthly':
+        for jk_key in ('JK_DSES_TABLE', 'JK_DSES_SCHEMA', 'JK_POPULATION_TABLE', 'JK_POPULATION_SCHEMA'):
+            if not s.get(jk_key):
+                errors.append(f"{jk_key} — JK_SOURCE='hana_monthly'일 때 비어 있으면 안 됩니다")
 
     if errors:
         raise ValueError("STUDY_SETTINGS 오류:\n  " + "\n  ".join(errors))
@@ -376,6 +413,9 @@ _INFRA_SETTINGS_KEYS = frozenset({
     'HHDV_TABLE', 'HHDV_STD_YYYY_COL', 'HHDV_BYEAR_COL',
     'T20_FORM_CD', 'T20_PAY_YN',
     'HHDV_GAIBJA_TYPES', 'COHORT_USE_HHDV',
+    # JK 자격DB 인프라 설정 — JSON 복원 시 덮어쓰지 않음
+    'JK_SOURCE', 'JK_DSES_TABLE', 'JK_DSES_SCHEMA',
+    'JK_POPULATION_TABLE', 'JK_POPULATION_SCHEMA',
 })
 
 

@@ -20,6 +20,7 @@ from db_connector import (
     DataManager,
     SASFileLoader,
     MonthlyHanaExtractor,
+    MonthlyJKExtractor,
     CohortIDExtractor,
     _COHORT_ID_CHUNK_SIZE,
 )
@@ -370,11 +371,19 @@ class TestMonthlyHanaExtractor:
 
         cache_dir = tmp_path / 'T20'
         cache_dir.mkdir()
-        # 2013년 1월 Parquet 미리 생성 (유효한 행 있음)
-        df_pre = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
+        # 2013년 1월 Parquet 미리 생성 (실제 T20 수준 컬럼 수 ≥5 이어야 stale 판정 안 됨)
+        df_pre = pd.DataFrame({
+            'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001'],
+            'SEX_TYPE': ['1'], 'MDCARE_STRT_DT': ['20130101'],
+            'SICK_SYM1': ['E119'], 'YOYANG_CLSFC_CD': ['01'],
+        })
         df_pre.to_parquet(str(cache_dir / 'T20_201301.parquet'), index=False)
 
-        df_sample = pd.DataFrame({'INDI_DSCM_NO': ['B002'], 'CMN_KEY': ['K002']})
+        df_sample = pd.DataFrame({
+            'INDI_DSCM_NO': ['B002'], 'CMN_KEY': ['K002'],
+            'SEX_TYPE': ['2'], 'MDCARE_STRT_DT': ['20130201'],
+            'SICK_SYM1': ['E110'], 'YOYANG_CLSFC_CD': ['02'],
+        })
         fetch_calls = []
 
         def fake_fetch(table, schema, where_clause=None, **kwargs):
@@ -947,30 +956,44 @@ class TestDataManagerConnectHana:
 # CohortIDExtractor 테스트
 # ===========================================================================
 
-def _make_mock_hana(hhdv_rows_by_year=None, t20_rows_by_month=None):
+def _make_mock_hana(hhdv_rows_by_month=None, t20_rows_by_month=None):
     """CohortIDExtractor용 mock HANAConnector.
 
-    hhdv_rows_by_year: {year_str: [list of INDI_DSCM_NO]}
+    현재 구현(월별 `fetch_table_chunked` 호출)과 신규 구현(단일
+    `fetch_sql_keyset` 호출) 양쪽에 동일 픽스처로 동작한다.
+
+    hhdv_rows_by_month: {yyyymm_str: [list of INDI_DSCM_NO]}
     t20_rows_by_month: {yyyymm_str: [list of INDI_DSCM_NO]}
     """
-    hhdv_rows_by_year = hhdv_rows_by_year or {}
+    hhdv_rows_by_month = hhdv_rows_by_month or {}
     t20_rows_by_month = t20_rows_by_month or {}
 
+    def _month_in_range(m, base_sql):
+        import re
+        rng = re.search(r"(\d{6})'\s*AND\s*'(\d{6})", base_sql)
+        if rng:
+            start, end = rng.group(1), rng.group(2)
+            return start <= m <= end
+        # BETWEEN INT 변형
+        rng_int = re.search(r"BETWEEN\s+(\d{6})\s+AND\s+(\d{6})", base_sql)
+        if rng_int:
+            start, end = rng_int.group(1), rng_int.group(2)
+            return start <= m <= end
+        return True  # 범위 미지정 → 전부
+
     def fake_fetch(table_name, schema, columns=None, where_clause=None, chunk_size=None, **kwargs):
-        """table_name 과 where_clause 로 mock 데이터를 반환하는 제너레이터."""
-        if table_name == 'HHDV_DSES_YY':
-            # STD_YYYY = 'YYYY' 에서 연도 파싱
-            year = None
+        """table_name 과 where_clause 로 mock 데이터를 반환하는 제너레이터 (레거시 경로)."""
+        if table_name == 'HHDT_POPULATION_MM':
+            yyyymm = None
             if where_clause:
                 import re
-                m = re.search(r"STD_YYYY\s*=\s*'(\d{4})'", where_clause)
+                m = re.search(r"STD_YYYYMM\s*=\s*'(\d{6})'", where_clause)
                 if m:
-                    year = m.group(1)
-            ids = hhdv_rows_by_year.get(year, [])
+                    yyyymm = m.group(1)
+            ids = hhdv_rows_by_month.get(yyyymm, [])
             if ids:
                 yield pd.DataFrame({'INDI_DSCM_NO': ids})
         elif table_name == 'T20':
-            # MDCARE_STRT_YYYYMM = 'YYYYMM' 에서 월 파싱
             yyyymm = None
             if where_clause:
                 import re
@@ -981,9 +1004,31 @@ def _make_mock_hana(hhdv_rows_by_year=None, t20_rows_by_month=None):
             if ids:
                 yield pd.DataFrame({'INDI_DSCM_NO': ids})
 
+    def fake_keyset(base_sql, key_col, chunk_size=None, **kwargs):
+        """신규 경로: 단일 SQL을 실행한 것처럼 HHDV × T20 월별 교집합 합집합을 반환."""
+        use_hhdv = 'STD_YYYYMM' in base_sql and 'BYEAR' in base_sql
+        # 범위 내 월들의 합집합 (연단위 fallback일 때 연단위 범위로 들어옴)
+        all_months = sorted(set(hhdv_rows_by_month) | set(t20_rows_by_month))
+        cohort = set()
+        for m in all_months:
+            if not _month_in_range(m, base_sql):
+                continue
+            t20_ids = set(t20_rows_by_month.get(m, []))
+            if use_hhdv:
+                hhdv_ids = set(hhdv_rows_by_month.get(m, []))
+                cohort |= (hhdv_ids & t20_ids)
+            else:
+                cohort |= t20_ids
+        if cohort:
+            yield pd.DataFrame({'INDI_DSCM_NO': sorted(cohort)})
+
     hana = MagicMock(spec=HANAConnector)
     hana.fetch_table_chunked.side_effect = fake_fetch
     hana._detect_column_type.return_value = 'NVARCHAR'  # 문자열 비교
+    # fetch_sql_keyset는 신규 메서드 — 구현 전에는 spec에 없어 접근 시 AttributeError.
+    # 구현 적용 후에는 spec에 포함되어 side_effect 설정이 가능해진다.
+    if hasattr(HANAConnector, 'fetch_sql_keyset'):
+        hana.fetch_sql_keyset.side_effect = fake_keyset
     return hana
 
 
@@ -1023,11 +1068,11 @@ class TestCohortIDExtractor:
 
     def test_extracts_intersection_of_age_and_dm(self, tmp_path):
         """연령+DM 조건을 모두 만족하는 환자만 추출된다."""
-        # P001: HHDV(연령 ok, 2013) + T20(DM ok, 201301) → 포함
-        # P002: HHDV(연령 ok, 2013)만, T20 없음 → 제외
+        # P001: HHDV(연령 ok, 201301) + T20(DM ok, 201301) → 포함
+        # P002: HHDV(연령 ok, 201301)만, T20 없음 → 제외
         # P003: T20(DM ok, 201301)만, HHDV 없음 → 제외
         hana = _make_mock_hana(
-            hhdv_rows_by_year={'2013': ['P001', 'P002']},
+            hhdv_rows_by_month={'201301': ['P001', 'P002']},
             t20_rows_by_month={'201301': ['P001', 'P003']},
         )
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
@@ -1036,8 +1081,8 @@ class TestCohortIDExtractor:
             'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2013,
             'MIN_AGE': 40, 'MAX_AGE': 64,
             'COHORT_USE_HHDV': True,
-            'HHDV_TABLE': 'HHDV_DSES_YY',
-            'HHDV_STD_YYYY_COL': 'STD_YYYY',
+            'HHDV_TABLE': 'HHDT_POPULATION_MM',
+            'HHDV_STD_YYYY_COL': 'STD_YYYYMM',
             'HANA_TABLE_MAP': {},  # 테스트: alias 그대로 사용 (T20 → T20)
         }):
             result = extractor.extract(force=True)
@@ -1049,7 +1094,7 @@ class TestCohortIDExtractor:
     def test_accumulates_across_months(self, tmp_path):
         """여러 월에 걸쳐 누적되고 중복이 제거된다."""
         hana = _make_mock_hana(
-            hhdv_rows_by_year={'2013': ['P001', 'P002']},
+            hhdv_rows_by_month={'201301': ['P001', 'P002'], '201306': ['P001', 'P002']},
             t20_rows_by_month={
                 '201301': ['P001'],
                 '201306': ['P001', 'P002'],  # P001 중복, P002 신규
@@ -1061,8 +1106,8 @@ class TestCohortIDExtractor:
             'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2013,
             'MIN_AGE': 40, 'MAX_AGE': 64,
             'COHORT_USE_HHDV': True,
-            'HHDV_TABLE': 'HHDV_DSES_YY',
-            'HHDV_STD_YYYY_COL': 'STD_YYYY',
+            'HHDV_TABLE': 'HHDT_POPULATION_MM',
+            'HHDV_STD_YYYY_COL': 'STD_YYYYMM',
             'HANA_TABLE_MAP': {},
         }):
             result = extractor.extract(force=True)
@@ -1072,7 +1117,7 @@ class TestCohortIDExtractor:
     def test_caches_to_parquet(self, tmp_path):
         """추출 결과가 cohort_ids.parquet으로 저장된다."""
         hana = _make_mock_hana(
-            hhdv_rows_by_year={'2013': ['P001']},
+            hhdv_rows_by_month={'201301': ['P001']},
             t20_rows_by_month={'201301': ['P001']},
         )
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
@@ -1081,8 +1126,8 @@ class TestCohortIDExtractor:
             'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2013,
             'MIN_AGE': 40, 'MAX_AGE': 64,
             'COHORT_USE_HHDV': True,
-            'HHDV_TABLE': 'HHDV_DSES_YY',
-            'HHDV_STD_YYYY_COL': 'STD_YYYY',
+            'HHDV_TABLE': 'HHDT_POPULATION_MM',
+            'HHDV_STD_YYYY_COL': 'STD_YYYYMM',
             'HANA_TABLE_MAP': {},
         }):
             extractor.extract(force=True)
@@ -1110,41 +1155,43 @@ class TestCohortIDExtractor:
         assert result == frozenset(['P999'])
         hana.fetch_table_chunked.assert_not_called()
 
-    def test_hhdv_year_failure_skips_year_and_continues(self, tmp_path):
-        """HHDV 특정 연도 조회 실패 시 해당 연도만 건너뛰고 다른 연도는 계속된다."""
+    def test_full_range_failure_falls_back_to_yearly_split(self, tmp_path):
+        """전체 범위 SQL 실패(OOM/timeout 등) 시 연단위 분할 fallback으로 추출을 계속한다.
+
+        계약: 일부 연도 쿼리가 실패해도 성공한 연도의 코호트 ID는 최종 집합에 포함된다.
+        구현(월별 루프 vs 단일 SQL)에 무관한 복구 계약.
+        """
         hana = MagicMock(spec=HANAConnector)
         hana._detect_column_type.return_value = 'NVARCHAR'
 
-        call_count = {'n': 0}
+        call_log = []
 
-        def fake_fetch(table_name, schema, columns=None, where_clause=None, chunk_size=None, **kwargs):
-            if table_name == 'HHDV_DSES_YY':
-                call_count['n'] += 1
-                import re as _re
-                m = _re.search(r"STD_YYYY\s*=\s*'(\d{4})'", where_clause or '')
-                year = m.group(1) if m else None
-                if year == '2013':
-                    raise RuntimeError("HHDV 2013 조회 실패 (네트워크)")
-                if year == '2014':
-                    yield pd.DataFrame({'INDI_DSCM_NO': ['P001', 'P002']})
-            elif table_name == 'T20':
-                yield pd.DataFrame({'INDI_DSCM_NO': ['P001']})
+        def fake_keyset(base_sql, key_col, chunk_size=None, **kwargs):
+            call_log.append(base_sql)
+            # 첫 호출(전체 범위 2013~2014) 실패 → fallback 유도
+            if call_log.__len__() == 1 and '201301' in base_sql and '201412' in base_sql:
+                raise RuntimeError("HANA 전체 범위 실행 실패 (OOM)")
+            # 연단위 fallback: 2013년은 실패, 2014년만 성공
+            if '201301' in base_sql and '201312' in base_sql:
+                raise RuntimeError("HANA 2013년 조회 실패 (네트워크)")
+            if '201401' in base_sql and '201412' in base_sql:
+                yield pd.DataFrame({'INDI_DSCM_NO': ['P001', 'P002']})
 
-        hana.fetch_table_chunked.side_effect = fake_fetch
+        hana.fetch_sql_keyset.side_effect = fake_keyset
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
 
         with patch.dict('config.STUDY_SETTINGS', {
             'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2014,
             'MIN_AGE': 40, 'MAX_AGE': 64,
             'COHORT_USE_HHDV': True,
-            'HHDV_TABLE': 'HHDV_DSES_YY',
-            'HHDV_STD_YYYY_COL': 'STD_YYYY',
+            'HHDV_TABLE': 'HHDT_POPULATION_MM',
+            'HHDV_STD_YYYY_COL': 'STD_YYYYMM',
             'HANA_TABLE_MAP': {},
         }):
             result = extractor.extract(force=True)
 
-        # 2013 실패해도 2014 결과(P001)는 포함되어야 함
-        assert 'P001' in result, f"2014 연도 결과가 포함되어야 함: {result}"
+        assert 'P001' in result, f"2014년 fallback 결과가 포함되어야 함: {result}"
+        assert 'P002' in result
 
 
 # ===========================================================================
@@ -1222,7 +1269,7 @@ class TestHANAConnectorRetry:
     def test_raises_when_no_cohort_found(self, tmp_path):
         """조건 만족 환자가 없으면 RuntimeError 발생."""
         hana = _make_mock_hana(
-            hhdv_rows_by_year={'2013': []},
+            hhdv_rows_by_month={'201301': []},
             t20_rows_by_month={},
         )
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
@@ -1235,11 +1282,23 @@ class TestHANAConnectorRetry:
             with pytest.raises(RuntimeError, match="조건을 만족하는 환자"):
                 extractor.extract(force=True)
 
-    def test_hhdv_queried_once_per_year(self, tmp_path):
-        """HHDV_DSES_YY는 연도별 1회만 조회한다 (12개월 × 1년 = 1회)."""
+    def test_enrollment_range_returns_union_of_monthly_intersections(self, tmp_path):
+        """계약(contract) 테스트: 진입기간 12개월 중 어느 월이든 HHDV ∩ T20 에 들어간
+        INDI_DSCM_NO 는 최종 집합에 포함되어야 한다.
+
+        구현 방식(월별 루프 vs 단일 SQL)에 **무관**한 집합 동치성 검증. 호출 횟수는
+        구현 세부사항이므로 계약에 속하지 않는다.
+        """
+        # 12개월 전부에 P001 존재. T20 DM코드는 201301·201306·201312에만 존재.
+        hhdv_month_data = {f'2013{mm:02d}': ['P001', 'P002'] for mm in range(1, 13)}
+        t20_month_data = {
+            '201301': ['P001', 'P003'],  # P001 매칭, P003 HHDV 미포함
+            '201306': ['P001'],
+            '201312': ['P002', 'P003'],  # P002 매칭, P003 HHDV 미포함
+        }
         hana = _make_mock_hana(
-            hhdv_rows_by_year={'2013': ['P001']},
-            t20_rows_by_month={'201301': ['P001']},
+            hhdv_rows_by_month=hhdv_month_data,
+            t20_rows_by_month=t20_month_data,
         )
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
 
@@ -1247,18 +1306,16 @@ class TestHANAConnectorRetry:
             'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2013,
             'MIN_AGE': 40, 'MAX_AGE': 64,
             'COHORT_USE_HHDV': True,
-            'HHDV_TABLE': 'HHDV_DSES_YY',
-            'HHDV_STD_YYYY_COL': 'STD_YYYY',
+            'HHDV_TABLE': 'HHDT_POPULATION_MM',
+            'HHDV_STD_YYYY_COL': 'STD_YYYYMM',
             'HANA_TABLE_MAP': {},
         }):
-            extractor.extract(force=True)
+            result = extractor.extract(force=True)
 
-        hhdv_calls = [
-            c for c in hana.fetch_table_chunked.call_args_list
-            if c.args[0] == 'HHDV_DSES_YY'
-        ]
-        assert len(hhdv_calls) == 1, \
-            f"HHDV_DSES_YY는 연도별 1회만 조회해야 한다. 실제: {len(hhdv_calls)}회"
+        assert result == frozenset(['P001', 'P002']), (
+            "HHDV ∩ T20 월별 교집합의 합집합만 포함되어야 한다: "
+            f"기대 {{'P001','P002'}} 실제 {set(result)}"
+        )
 
     def test_monthly_extraction_with_cohort_ids(self, tmp_path):
         """MonthlyHanaExtractor에 cohort_ids 전달 시 WHERE 절에 IN 조건이 추가된다."""
@@ -1298,22 +1355,18 @@ class TestHANAConnectorRetry:
             f"cohort_ids 전달 시 WHERE에 INDI_DSCM_NO IN 조건 필요. 캡처된 WHERE: {captured_wheres}"
 
     def test_uses_hhdv_table_from_study_settings(self, tmp_path):
-        """STUDY_SETTINGS['HHDV_TABLE']이 설정되면 해당 테이블명으로 HANA 조회한다."""
+        """STUDY_SETTINGS['HHDV_TABLE']이 설정되면 해당 테이블명이 조회 SQL에 포함된다."""
         custom_table = 'CUSTOM_AGE_TABLE'
-        queried_tables = []
+        captured_sqls = []
 
         hana = MagicMock(spec=HANAConnector)
         hana._detect_column_type.return_value = 'NVARCHAR'
 
-        def fake_fetch(table_name, schema, columns=None, where_clause=None, chunk_size=None, **kwargs):
-            queried_tables.append(table_name)
-            # custom_table 조회 시 ID 1개 반환 (empty → skip 방지)
-            if table_name == custom_table:
-                yield pd.DataFrame({'INDI_DSCM_NO': ['P001']})
-            elif table_name == 'T20':
-                yield pd.DataFrame({'INDI_DSCM_NO': ['P001']})
+        def fake_keyset(base_sql, key_col, chunk_size=None, **kwargs):
+            captured_sqls.append(base_sql)
+            yield pd.DataFrame({'INDI_DSCM_NO': ['P001']})
 
-        hana.fetch_table_chunked.side_effect = fake_fetch
+        hana.fetch_sql_keyset.side_effect = fake_keyset
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
 
         with patch.dict('config.STUDY_SETTINGS', {
@@ -1325,10 +1378,15 @@ class TestHANAConnectorRetry:
         }):
             extractor.extract(force=True)
 
-        assert custom_table in queried_tables, \
-            f"HHDV_TABLE='{custom_table}' 설정 시 해당 테이블 조회 필요. 실제 조회: {queried_tables}"
-        assert 'HHDV_DSES_YY' not in queried_tables, \
-            "커스텀 HHDV_TABLE 설정 시 기본 'HHDV_DSES_YY' 조회 금지"
+        assert captured_sqls, "fetch_sql_keyset 호출이 한 번은 있어야 함"
+        full_sql = ' '.join(captured_sqls)
+        assert custom_table in full_sql, (
+            f"HHDV_TABLE='{custom_table}' 설정 시 해당 테이블이 SQL 에 포함돼야 함. "
+            f"실제 SQL: {full_sql[:400]}"
+        )
+        assert 'HHDV_DSES_YY' not in full_sql, (
+            "커스텀 HHDV_TABLE 설정 시 기본 'HHDV_DSES_YY' 참조 금지"
+        )
 
 
 class TestDuckDBStorageExecuteParams:
@@ -1405,7 +1463,7 @@ class TestCohortIDExtractorEmptyResult:
         """HHDV와 T20 교집합이 완전히 비어있으면 RuntimeError를 발생시킨다."""
         # HHDV에는 P001이 있지만 T20에는 아무것도 없음 → 교집합 0건
         hana = _make_mock_hana(
-            hhdv_rows_by_year={'2013': ['P001']},
+            hhdv_rows_by_month={'201301': ['P001']},
             t20_rows_by_month={},
         )
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
@@ -1413,6 +1471,302 @@ class TestCohortIDExtractorEmptyResult:
         with patch.dict('config.STUDY_SETTINGS', {
             'ENROLLMENT_START': 2013, 'ENROLLMENT_END': 2013,
             'MIN_AGE': 40, 'MAX_AGE': 64,
+            'COHORT_USE_HHDV': True,
+            'HHDV_TABLE': 'HHDT_POPULATION_MM',
+            'HHDV_STD_YYYY_COL': 'STD_YYYYMM',
         }):
             with pytest.raises(RuntimeError, match="조건을 만족하는 환자가 없습니다"):
                 extractor.extract(force=True)
+
+
+class TestBuildCohortIdSql:
+    """신규 헬퍼 `_build_cohort_id_sql` 계약 검증 (RED → GREEN).
+
+    이 헬퍼는 HHDV × T20 서버측 JOIN 으로 INDI_DSCM_NO 집합을 단일 SQL로 구성한다.
+    월별 루프를 제거하고 HANA 전송량을 코호트 ID 수준으로 축소하는 것이 목표.
+    """
+
+    def test_helper_exists(self):
+        """`_build_cohort_id_sql` 이 db_connector 모듈에 정의되어 있다."""
+        assert hasattr(_db_connector, '_build_cohort_id_sql'), (
+            "db_connector 에 _build_cohort_id_sql 헬퍼가 필요합니다."
+        )
+
+    def test_returns_select_distinct_on_indi_dscm_no(self):
+        """결과는 단일 컬럼 DISTINCT INDI_DSCM_NO 를 반환하는 SELECT 문이다."""
+        sql = _db_connector._build_cohort_id_sql(
+            enroll_start=2013, enroll_end=2016,
+            t20_schema='NHIS', t20_table='T20',
+            use_hhdv=True,
+            hhdv_schema='NHIS', hhdv_table='HHDT_POPULATION_MM',
+        )
+        assert 'SELECT' in sql.upper()
+        assert 'DISTINCT' in sql.upper()
+        assert 'INDI_DSCM_NO' in sql.upper()
+        # 파괴적 구문 금지
+        for banned in ('DROP', 'DELETE', 'INSERT', 'UPDATE', 'ALTER'):
+            assert banned not in sql.upper(), f"{banned} 포함 금지"
+
+    def test_applies_all_t20_filters(self):
+        """T20 기본 필터(PAY_YN='1', FORM_CD IN, INDI_DSCM_NO 유효범위)가 빠짐없이 들어간다."""
+        sql = _db_connector._build_cohort_id_sql(
+            enroll_start=2013, enroll_end=2016,
+            t20_schema='NHIS', t20_table='T20',
+            form_cd_list=('02', '03', '07', '08', '09', '10', '11', '15'),
+            pay_yn='1',
+            use_hhdv=False,
+        )
+        up = sql.upper()
+        assert "PAY_YN" in up
+        assert "'1'" in sql
+        assert "FORM_CD" in up
+        for cd in ('02', '03', '07', '08', '09', '10', '11', '15'):
+            assert f"'{cd}'" in sql, f"FORM_CD={cd} 누락"
+        # 개인식별자 유효 범위
+        assert "INDI_DSCM_NO" in up
+        assert "99999999" in sql
+
+    def test_dm_code_filter_uses_null_space_safe_substring(self):
+        """SICK_SYM1~5 의 DM 코드 비교는 NULL/공백 안전(LEFT+TRIM 또는 동등)해야 한다."""
+        sql = _db_connector._build_cohort_id_sql(
+            enroll_start=2013, enroll_end=2016,
+            t20_schema='NHIS', t20_table='T20',
+            use_hhdv=False,
+        )
+        up = sql.upper()
+        # 5개 SICK_SYM 모두 비교
+        for i in range(1, 6):
+            assert f'SICK_SYM{i}' in up, f"SICK_SYM{i} 필터 누락"
+        # E10~E14 전부 포함
+        for code in ('E10', 'E11', 'E12', 'E13', 'E14'):
+            assert f"'{code}'" in sql, f"DM 코드 '{code}' 누락"
+        # 공백 안전: TRIM 또는 LTRIM/RTRIM 사용 (HANA CHAR trailing space 대응)
+        assert 'TRIM' in up, "HANA CHAR trailing space 대비로 TRIM 필요"
+
+    def test_hhdv_join_keys_include_month_and_indi(self):
+        """use_hhdv=True 시 JOIN 키로 STD_YYYYMM=MDCARE_STRT_YYYYMM 과 INDI_DSCM_NO 동시 매칭."""
+        sql = _db_connector._build_cohort_id_sql(
+            enroll_start=2013, enroll_end=2016,
+            t20_schema='NHIS', t20_table='T20',
+            use_hhdv=True,
+            hhdv_schema='NHIS', hhdv_table='HHDT_POPULATION_MM',
+            hhdv_std_col='STD_YYYYMM', hhdv_std_is_monthly=True,
+            min_age=40, max_age=64,
+        )
+        up = sql.upper()
+        # JOIN 과 두 키 전부 확인
+        assert 'JOIN' in up
+        assert 'STD_YYYYMM' in up
+        assert 'MDCARE_STRT_YYYYMM' in up
+        # 연령 범위
+        assert '40' in sql
+        assert '64' in sql
+        assert 'BYEAR' in up
+        # 자격유형 기본값
+        for t in ('1', '2', '5', '6', '7', '8'):
+            assert f"'{t}'" in sql
+
+    def test_enrollment_range_expressed_as_month_bounds(self):
+        """진입기간은 MDCARE_STRT_YYYYMM 기준 YYYYMM 경계로 표현된다 (2013~2016 → 201301..201612)."""
+        sql = _db_connector._build_cohort_id_sql(
+            enroll_start=2013, enroll_end=2016,
+            t20_schema='NHIS', t20_table='T20',
+            use_hhdv=False,
+        )
+        assert '201301' in sql
+        assert '201612' in sql
+
+    def test_t20_monthly_int_column(self):
+        """MDCARE_STRT_YYYYMM 이 INT 타입이면 따옴표 없이 숫자 리터럴 비교."""
+        sql = _db_connector._build_cohort_id_sql(
+            enroll_start=2013, enroll_end=2013,
+            t20_schema='NHIS', t20_table='T20',
+            t20_monthly_is_int=True,
+            use_hhdv=False,
+        )
+        # 숫자 리터럴 (따옴표 미포함) 형태여야 함
+        assert '201301' in sql
+        # int 경로면 '201301' 형태의 문자열 리터럴이 최소한 month 비교에는 없어야 함
+        assert "MDCARE_STRT_YYYYMM" in sql.upper()
+
+
+class TestFetchSqlKeyset:
+    """신규 `HANAConnector.fetch_sql_keyset` 계약 검증 (RED → GREEN).
+
+    임의의 SELECT SQL 을 key_col 기준 keyset(cursor-based) 페이징으로 청크 조회.
+    distinct=True → LIMIT/OFFSET 경로(O(n²))를 대체한다.
+    """
+
+    def test_method_exists(self):
+        """HANAConnector.fetch_sql_keyset 메서드가 정의되어 있다."""
+        assert hasattr(HANAConnector, 'fetch_sql_keyset'), (
+            "HANAConnector 에 fetch_sql_keyset 메서드가 필요합니다."
+        )
+
+    def test_rejects_dml_base_sql(self):
+        """base_sql 에 DML/DDL 이 포함되면 ValueError 를 발생시킨다."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        conn.conn = MagicMock()
+        with pytest.raises(ValueError):
+            # 제너레이터이므로 next() 로 실제 실행 시점에 검증 발동
+            gen = conn.fetch_sql_keyset(
+                "SELECT x FROM t; DROP TABLE t",
+                key_col='x',
+            )
+            next(gen)
+
+    def test_rejects_invalid_key_col(self):
+        """key_col 이 식별자 형식이 아니면 ValueError."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        conn.conn = MagicMock()
+        with pytest.raises(ValueError):
+            gen = conn.fetch_sql_keyset(
+                "SELECT INDI_DSCM_NO FROM t",
+                key_col='INDI; DROP',
+            )
+            next(gen)
+
+    def test_paginates_via_keyset_cursor(self):
+        """base_sql 결과를 key_col 기준 페이징으로 반환하며, 커서는 마지막 key 값 이후로 이동."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        mock_conn = MagicMock()
+
+        executed = []
+
+        def _cursor_factory():
+            cur = MagicMock()
+            cur.description = [('INDI_DSCM_NO',)]
+
+            # execute(sql[, params]) 호출 시마다 기록하고 적절한 행 반환
+            def _execute(sql, params=None):
+                executed.append((sql, params))
+                page_num = len(executed)
+                if page_num == 1:
+                    cur._rows = [('100',), ('200',)]
+                elif page_num == 2:
+                    cur._rows = [('300',)]
+                else:
+                    cur._rows = []
+
+            cur.execute.side_effect = _execute
+            cur.fetchall.side_effect = lambda: getattr(cur, '_rows', [])
+            return cur
+
+        mock_conn.cursor.side_effect = _cursor_factory
+        conn.conn = mock_conn
+
+        chunks = list(conn.fetch_sql_keyset(
+            "SELECT INDI_DSCM_NO FROM \"NHIS\".\"T20\" WHERE PAY_YN='1'",
+            key_col='INDI_DSCM_NO',
+            chunk_size=2,
+        ))
+
+        # 최소 1페이지 이상 받았고, 총 3건
+        all_ids = []
+        for df in chunks:
+            all_ids.extend(df['INDI_DSCM_NO'].astype(str).tolist())
+        assert all_ids == ['100', '200', '300'], f"keyset 순서 보장 필요: {all_ids}"
+
+        # 2번째 호출에는 bind params 로 마지막 key 값이 전달되어야 함
+        # (첫 페이지는 params=None 또는 빈 리스트, 이후는 last key 포함)
+        if len(executed) >= 2:
+            second_params = executed[1][1]
+            assert second_params is not None and len(second_params) >= 1
+            assert str(second_params[0]) == '200', (
+                f"2번째 페이지 bind param 은 1페이지 마지막 key 값이어야 함: {second_params}"
+            )
+
+
+class TestMonthlyJKExtractor:
+    """MonthlyJKExtractor 단위 테스트."""
+
+    def test_month_range(self):
+        """STUDY_SETTINGS 기반 월 범위 생성."""
+        extractor = MonthlyJKExtractor(None, None, '/tmp')
+        months = extractor._month_range()
+        assert len(months) == 144  # (2024 - 2013 + 1) * 12
+        assert months[0] == '201301'
+        assert months[-1] == '202412'
+
+    def test_init_rejects_invalid_identifiers(self, tmp_path):
+        """UI/설정에서 주입된 불량 schema/table 식별자는 ValueError (SQL 인젝션 차단)."""
+        bad_idents = [
+            {'pop_schema': 'NHIS;DROP TABLE T20'},
+            {'pop_table': 'HHDT_POPULATION_MM"'},
+            {'dses_schema': 'NHIS SCHEMA'},  # space
+            {'dses_table': '1BAD_TABLE'},    # starts with digit
+        ]
+        for override in bad_idents:
+            with pytest.raises(ValueError, match="유효하지 않은"):
+                MonthlyJKExtractor(None, None, tmp_path, **override)
+
+    def test_build_join_sql_no_cohort(self):
+        """cohort_ids 없을 때 JOIN SQL에 IN절 없음."""
+        extractor = MonthlyJKExtractor(None, None, '/tmp',
+                                       pop_schema='NHISBDA', pop_table='HHDT_POPULATION_MM',
+                                       dses_schema='NHISBDA', dses_table='HHDT_DSES_YY')
+        sql = extractor._build_join_sql('201301')
+        assert "HHDT_POPULATION_MM" in sql
+        assert "HHDT_DSES_YY" in sql
+        assert "STD_YYYYMM = '201301'" in sql
+        assert "STD_YYYY" in sql
+        assert "HHDT_DEATH" in sql
+        assert "IN (" not in sql
+
+    def test_build_join_sql_with_cohort(self):
+        """cohort_ids 있을 때 IN절 포함."""
+        extractor = MonthlyJKExtractor(None, None, '/tmp')
+        sql = extractor._build_join_sql('201301', cohort_ids=frozenset(['100', '200', '300']))
+        assert "IN (" in sql
+
+    def test_extract_all_months_uses_cache(self, tmp_path):
+        """force=False 시 기존 JK 캐시(≥5컬럼) 재사용."""
+        cache_dir = tmp_path / 'JK'
+        cache_dir.mkdir()
+        # 유효한 캐시 파일 생성 (6컬럼)
+        df = pd.DataFrame({
+            'STD_YYYYMM': ['201301'], 'STD_YYYY': ['2013'],
+            'INDI_DSCM_NO': ['001'], 'SEX_TYPE': ['1'],
+            'BYEAR': ['1970'], 'GAIBJA_TYPE': ['1'],
+        })
+        df.to_parquet(str(cache_dir / 'JK_201301.parquet'), index=False)
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_sql_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 1
+
+        extractor = MonthlyJKExtractor(mock_hana, mock_storage, str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013, 'STUDY_END_YEAR': 2013,
+        }):
+            extractor.extract_all_months(force=False)
+
+        # 캐시 파일이 있으므로 fetch_sql_chunked는 나머지 11개월에 대해서만 호출
+        assert mock_hana.fetch_sql_chunked.call_count == 11
+
+    def test_stale_cache_triggers_reextract(self, tmp_path):
+        """컬럼 수 < 5인 stale 캐시는 삭제 후 모든 월 재추출."""
+        cache_dir = tmp_path / 'JK'
+        cache_dir.mkdir()
+        # 2컬럼짜리 stale 파일
+        pd.DataFrame({'A': [1], 'B': [2]}).to_parquet(
+            str(cache_dir / 'JK_201301.parquet'), index=False
+        )
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_sql_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 0
+
+        extractor = MonthlyJKExtractor(mock_hana, mock_storage, str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013, 'STUDY_END_YEAR': 2013,
+        }):
+            # stale 캐시 삭제 후 12개월 모두 재추출; 빈 데이터도 명시적 스키마로 저장되므로 오류 없이 완료
+            extractor.extract_all_months(force=False)
+
+        # stale 캐시이므로 모든 12개월에 대해 재추출 시도
+        assert mock_hana.fetch_sql_chunked.call_count == 12
+        # DuckDB 병합(execute)이 호출되었는지 확인
+        assert mock_storage.execute.called
