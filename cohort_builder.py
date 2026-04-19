@@ -264,11 +264,11 @@ class CohortBuilder:
             SELECT INDI_DSCM_NO FROM dm_patients GROUP BY INDI_DSCM_NO HAVING COUNT(DISTINCT dm_type) > 1
         """)
 
-        # med_pattern: Phase 2 변경 — immortal time bias 차단
-        # 약물 집계 기간을 [first_dm_date, MIN(first_dm_date+LOOKBACK_YEARS, index_date)]로 제한
-        # Phase 2 추가: insulin_start_date 컬럼 (기저선 기간 내 첫 인슐린 처방일)
-        _lookback_days = int(self.settings.get('LOOKBACK_YEARS', 1)) * 365
-        self.dm.execute(f"""
+        # med_pattern: Phase 2 개정 — 초기 약물 치료 기간 정의
+        # 약물 집계 기간: [first_dm_date, first_dm_date + 90일]
+        # 근거: 한국 당뇨병 진료지침 및 ADA 기준 (초진 후 3개월 내 재평가)
+        # 90일은 초기 약물 시작 후 치료 반응 평가 시점으로 임상적 근거 있음
+        self.dm.execute("""
             CREATE OR REPLACE TABLE med_pattern AS
             SELECT m.INDI_DSCM_NO,
                    MAX(CASE WHEN m.med_type='INSULIN' THEN 1 ELSE 0 END) AS has_insulin,
@@ -277,13 +277,10 @@ class CohortBuilder:
             FROM dm_medications m
             INNER JOIN dm_patients dp ON m.INDI_DSCM_NO = dp.INDI_DSCM_NO
             WHERE m.rx_date >= dp.first_dm_date
-              AND m.rx_date <= LEAST(
-                  REPLACE(CAST(
-                      (CAST(SUBSTR(dp.first_dm_date,1,4)||'-'||SUBSTR(dp.first_dm_date,5,2)||'-'||SUBSTR(dp.first_dm_date,7,2) AS DATE)
-                      + INTERVAL '{_lookback_days}' DAY)::DATE
-                  AS VARCHAR), '-', ''),
-                  dp.first_dm_date  -- immortal time bias 차단: index_date 이전으로 상한 제한
-              )
+              AND m.rx_date <= REPLACE(CAST(
+                  (CAST(SUBSTR(dp.first_dm_date,1,4)||'-'||SUBSTR(dp.first_dm_date,5,2)||'-'||SUBSTR(dp.first_dm_date,7,2) AS DATE)
+                  + INTERVAL '90' DAY)::DATE
+              AS VARCHAR), '-', '')
             GROUP BY m.INDI_DSCM_NO
         """)
 
