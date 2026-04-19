@@ -167,6 +167,9 @@ python -m PyInstaller --noconfirm --onedir --windowed^
  --hidden-import nhis_schema^
  --hidden-import variable_generator^
  --hidden-import statistical_analysis^
+ --hidden-import phase2_visualization^
+ --hidden-import phase2_final_report^
+ --hidden-import phase2_subgroup_analysis_example^
  --hidden-import pyarrow^
  --hidden-import pyarrow.parquet^
  --hidden-import pyarrow.lib^
