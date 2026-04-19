@@ -362,7 +362,18 @@ class CohortBuilder:
             if cb: cb(f"✓ med_switch 생성: {n_switch}명 전환 추적")
         except Exception as e:
             logger.warning(f"Step 4-ext: med_switch 생성 실패: {e}")
-            if cb: cb(f"[경고] med_switch 생성 실패 (서브그룹 분석 미지원): {e}")
+            # 빈 스텁 테이블 생성 — variable_generator의 LEFT JOIN 크래시 방지
+            try:
+                self.dm.execute("""
+                    CREATE OR REPLACE TABLE med_switch AS
+                    SELECT INDI_DSCM_NO, NULL::VARCHAR AS insulin_switch_date
+                    FROM analysis_data WHERE 1=0
+                """)
+                logger.info("Step 4-ext: med_switch 빈 테이블 생성 (LEFT JOIN 호환성)")
+                if cb: cb(f"[경고] med_switch 생성 실패 → 빈 스텁 테이블 사용 (서브그룹 분석 미지원): {e}")
+            except Exception as stub_e:
+                logger.error(f"Step 4-ext: med_switch 스텁 테이블 생성도 실패: {stub_e}")
+                raise RuntimeError(f"med_switch 테이블 생성 불가: 원본={e}, 스텁={stub_e}")
 
         return result, warnings
 

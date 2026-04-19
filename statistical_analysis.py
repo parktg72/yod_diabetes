@@ -247,15 +247,78 @@ class StatisticalAnalyzer:
             gc.collect()
 
     def _prepare(self, df, cb=None):
-        """공변량 전처리 — 캐시 원본 보호를 위해 1회 copy 후 파생변수 추가"""
+        """공변량 전처리 — 캐시 원본 보호를 위해 1회 copy 후 파생변수 추가
+
+        Phase 2 통합: insulin_start_date, med_switch_date 처리
+        - baseline_has_insulin: DM 환자 중 기저선 기간 내 인슐린 처방 여부
+        - had_insulin_switch: T2DM_OHA/NOMED 환자 중 추적 중 인슐린 전환 여부 (from med_switch)
+        - days_to_switch: 인슐린 전환까지 일수 (음수면 미전환)
+
+        ⚠️ IMMORTAL TIME BIAS 경고:
+        had_insulin_switch, days_to_switch는 정의상 index_date > 시점 변수.
+        이들을 Cox/PSM의 정적 공변량으로 사용할 수 없음 (Suissa 2008).
+        - 허용: 서술적 하위그룹 분석 (T2DM_OHA × switch 분층화 표)
+        - 불가: Cox 회귀, PSM 공변량, 노출-결과 모델
+        시변공변량/랜드마크 분석 필요 시 별도 구현 필요.
+        """
         if cb: cb("데이터 전처리 중...")
-        prepared = df.copy()  # 캐시(_cached_df) 원본 변경 방지를 위해 copy 필요
+        prepared = df.copy()  # 캐시(_cached_df) 원본 변경 방지를 위해 copy 필수
 
         prepared['is_t1dm'] = (prepared['exposure_group'] == 'T1DM').astype('int8')
         prepared['is_t2dm_oha'] = (prepared['exposure_group'] == 'T2DM_OHA').astype('int8')
         prepared['is_t2dm_insulin'] = (prepared['exposure_group'] == 'T2DM_INSULIN').astype('int8')
         prepared['is_t2dm_nomed'] = (prepared['exposure_group'] == 'T2DM_NOMED').astype('int8')
         prepared['male'] = (prepared['SEX_TYPE'] == '1').astype('int8')
+
+        # Phase 2: insulin_start_date 처리 (VARCHAR YYYYMMDD → 분석 변수)
+        if 'insulin_start_date' in prepared.columns:
+            # DM 환자(T1DM, T2DM_*)만 해석, NON_DM은 0으로 설정 (분석에서 제외)
+            is_dm = prepared['exposure_group'] != 'NON_DM'
+            prepared['baseline_has_insulin'] = 0  # 기본값: 인슐린 없음
+
+            # NULL이 아닌 insulin_start_date를 가진 DM 환자는 기저선 내 인슐린 사용
+            has_insulin_date = is_dm & prepared['insulin_start_date'].notna()
+            prepared.loc[has_insulin_date, 'baseline_has_insulin'] = 1
+            prepared['baseline_has_insulin'] = prepared['baseline_has_insulin'].astype('int8')
+            n_insulin = (has_insulin_date).sum()
+            logger.debug(f"baseline_has_insulin: {n_insulin} DM patients with baseline insulin")
+        else:
+            prepared['baseline_has_insulin'] = 0  # 컬럼 부재 시 모두 0 (미포함)
+
+        # Phase 2: med_switch_date 처리 (T2DM_OHA, T2DM_NOMED의 약물전환 추적)
+        if 'med_switch_date' in prepared.columns and 'index_date' in prepared.columns:
+            is_switch_eligible = prepared['exposure_group'].isin(['T2DM_OHA', 'T2DM_NOMED'])
+            prepared['had_insulin_switch'] = 0  # 기본값: 전환 없음
+            prepared['days_to_switch'] = pd.NA  # nullable Int64로 초기화
+
+            # med_switch_date가 있는 T2DM_OHA/NOMED만 전환 플래그 설정
+            had_switch = is_switch_eligible & prepared['med_switch_date'].notna()
+            prepared.loc[had_switch, 'had_insulin_switch'] = 1
+            prepared['had_insulin_switch'] = prepared['had_insulin_switch'].astype('int8')
+
+            # days_to_switch 계산 (T2DM_OHA/NOMED)
+            if had_switch.any():
+                try:
+                    # VARCHAR YYYYMMDD → date 변환 후 일수 계산 (벡터화 버전)
+                    switch_dates = pd.to_datetime(
+                        prepared.loc[had_switch, 'med_switch_date'],
+                        format='%Y%m%d', errors='coerce'
+                    )
+                    index_dates = pd.to_datetime(
+                        prepared.loc[had_switch, 'index_date'],
+                        format='%Y%m%d', errors='coerce'
+                    )
+                    prepared.loc[had_switch, 'days_to_switch'] = (
+                        (switch_dates - index_dates).dt.days
+                    ).astype('Int64')
+                    n_switched = prepared.loc[is_switch_eligible & prepared['days_to_switch'].notna()].shape[0]
+                    logger.debug(f"days_to_switch: {n_switched} T2DM_OHA/NOMED switched")
+                except Exception as e:
+                    logger.warning(f"days_to_switch 계산 실패: {e}")
+                    prepared['days_to_switch'] = pd.NA
+        else:
+            prepared['had_insulin_switch'] = np.nan
+            prepared['days_to_switch'] = pd.NA
 
         for col in ['age_at_index', 'index_year', 'income_quintile', 'bmi', 'cci_score',
                      'dm_duration_years', 'follow_up_years']:
@@ -763,6 +826,18 @@ class StatisticalAnalyzer:
             subgroups['cvd_yes'] = any_cvd == 1
             subgroups['cvd_no'] = any_cvd == 0
 
+        # Phase 2: T2DM_OHA 약물전환 서브그룹 (had_insulin_switch 기반)
+        if 'had_insulin_switch' in df.columns:
+            is_t2dm_oha = df['exposure_group'] == 'T2DM_OHA'
+            n_t2dm_oha = is_t2dm_oha.sum()
+            if n_t2dm_oha >= int(STUDY_SETTINGS.get('MIN_VALID_ROWS', 30)):
+                # T2DM_OHA만 포함하는 서브그룹
+                subgroups['t2dm_oha_noswitch'] = is_t2dm_oha & (df['had_insulin_switch'] == 0)
+                subgroups['t2dm_oha_switch'] = is_t2dm_oha & (df['had_insulin_switch'] == 1)
+                logger.debug(f"Phase 2 T2DM_OHA 약물전환: "
+                           f"미전환={subgroups['t2dm_oha_noswitch'].sum()}, "
+                           f"전환={subgroups['t2dm_oha_switch'].sum()}")
+
         # A4: 상호작용 p-value 계산을 위한 지시 변수 정의
         # (각 이분형 하위그룹 변수에 대해 LRT 기반 interaction p-value 계산)
         exposure_cols = ['is_t1dm', 'is_t2dm_oha', 'is_t2dm_insulin', 'is_t2dm_nomed']
@@ -789,6 +864,11 @@ class StatisticalAnalyzer:
             _sg_indicators['hypo'] = 'comp_hypoglycemia'
         if cvd_cols:
             _sg_parent.update({'cvd_yes': 'cvd', 'cvd_no': 'cvd'})
+
+        # Phase 2: T2DM_OHA 약물전환 상호작용
+        if 't2dm_oha_switch' in subgroups:
+            _sg_parent.update({'t2dm_oha_noswitch': 'med_switch', 't2dm_oha_switch': 'med_switch'})
+            _sg_indicators['med_switch'] = 'had_insulin_switch'
 
         model_cols_base = ['is_t1dm', 'is_t2dm_oha', 'is_t2dm_insulin', 'is_t2dm_nomed',
                            'age_at_index', 'male', 'cci_score',
@@ -835,8 +915,11 @@ class StatisticalAnalyzer:
 
         # A4: 상호작용 p-value (LRT) 계산 — 하위그룹 변수별
         # 지시 변수가 없는 경우 임시 컬럼을 df 복사본에 추가
-        df_int = df[[c for c in model_cols_base + list(_sg_indicators.values())
-                      if c in df.columns]].copy()
+        cols_int = model_cols_base + list(_sg_indicators.values())
+        # Phase 2: had_insulin_switch이 있으면 포함 (LRT 계산용)
+        if 'had_insulin_switch' in df.columns:
+            cols_int.append('had_insulin_switch')
+        df_int = df[[c for c in cols_int if c in df.columns]].copy()
 
         # 임시 지시 변수 추가
         if 'age_group' in df.columns:

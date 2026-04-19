@@ -316,7 +316,8 @@ class VariableGenerator:
                    cp.comp_retinopathy, cp.comp_nephropathy, cp.comp_neuropathy,
                    cp.comp_foot, cp.comp_hypoglycemia,
                    dd.dm_duration_years, dd.dm_duration_cat,
-                   cci.cci_score, cci.cci_category
+                   cci.cci_score, cci.cci_category,
+                   ms.insulin_switch_date AS med_switch_date
             FROM analysis_data ad
             LEFT JOIN demo_vars dv ON ad.INDI_DSCM_NO=dv.INDI_DSCM_NO
             LEFT JOIN health_exam_final he ON ad.INDI_DSCM_NO=he.INDI_DSCM_NO
@@ -325,6 +326,7 @@ class VariableGenerator:
             LEFT JOIN complication_vars cp ON ad.INDI_DSCM_NO=cp.INDI_DSCM_NO
             LEFT JOIN dm_duration_vars dd ON ad.INDI_DSCM_NO=dd.INDI_DSCM_NO
             LEFT JOIN cci_vars cci ON ad.INDI_DSCM_NO=cci.INDI_DSCM_NO
+            LEFT JOIN med_switch ms ON ad.INDI_DSCM_NO=ms.INDI_DSCM_NO
         """)
         return self.dm.storage.get_row_count('final_analysis')
 
