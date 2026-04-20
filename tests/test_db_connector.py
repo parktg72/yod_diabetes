@@ -1155,11 +1155,11 @@ class TestCohortIDExtractor:
         assert result == frozenset(['P999'])
         hana.fetch_table_chunked.assert_not_called()
 
-    def test_full_range_failure_falls_back_to_yearly_split(self, tmp_path):
-        """전체 범위 SQL 실패(OOM/timeout 등) 시 연단위 분할 fallback으로 추출을 계속한다.
+    def test_batch_failure_skips_batch_but_continues(self, tmp_path):
+        """분기별 배치 추출 중 일부 배치 실패 시 해당 배치는 스킵하되 다른 배치는 계속 추출한다.
 
-        계약: 일부 연도 쿼리가 실패해도 성공한 연도의 코호트 ID는 최종 집합에 포함된다.
-        구현(월별 루프 vs 단일 SQL)에 무관한 복구 계약.
+        계약: 일부 배치 쿼리가 실패해도 성공한 배치의 코호트 ID는 최종 집합에 포함된다.
+        진입기간 2013~2014 (24개월 → 8개 배치): 배치 2 실패, 나머지 성공.
         """
         hana = MagicMock(spec=HANAConnector)
         hana._detect_column_type.return_value = 'NVARCHAR'
@@ -1168,14 +1168,19 @@ class TestCohortIDExtractor:
 
         def fake_keyset(base_sql, key_col, chunk_size=None, **kwargs):
             call_log.append(base_sql)
-            # 첫 호출(전체 범위 2013~2014) 실패 → fallback 유도
-            if call_log.__len__() == 1 and '201301' in base_sql and '201412' in base_sql:
-                raise RuntimeError("HANA 전체 범위 실행 실패 (OOM)")
-            # 연단위 fallback: 2013년은 실패, 2014년만 성공
-            if '201301' in base_sql and '201312' in base_sql:
-                raise RuntimeError("HANA 2013년 조회 실패 (네트워크)")
-            if '201401' in base_sql and '201412' in base_sql:
+            # 배치 2(201304~201306) 실패
+            if '201304' in base_sql and '201306' in base_sql:
+                raise RuntimeError("배치 2 HANA 조회 실패 (네트워크)")
+            # 배치 4(201310~201312): P001 반환
+            if '201310' in base_sql and '201312' in base_sql:
                 yield pd.DataFrame({'INDI_DSCM_NO': ['P001', 'P002']})
+                return
+            # 배치 8(201410~201412): P003 반환
+            if '201410' in base_sql and '201412' in base_sql:
+                yield pd.DataFrame({'INDI_DSCM_NO': ['P003', 'P004']})
+                return
+            # 나머지 배치: 빈 결과
+            yield pd.DataFrame({'INDI_DSCM_NO': []})
 
         hana.fetch_sql_keyset.side_effect = fake_keyset
         extractor = CohortIDExtractor(hana, 'NHIS', tmp_path)
@@ -1190,8 +1195,11 @@ class TestCohortIDExtractor:
         }):
             result = extractor.extract(force=True)
 
-        assert 'P001' in result, f"2014년 fallback 결과가 포함되어야 함: {result}"
+        # 배치 2 실패했지만, 배치 4, 8의 결과는 포함
+        assert 'P001' in result, f"배치 4 결과가 포함되어야 함: {result}"
         assert 'P002' in result
+        assert 'P003' in result, f"배치 8 결과가 포함되어야 함: {result}"
+        assert 'P004' in result
 
 
 # ===========================================================================

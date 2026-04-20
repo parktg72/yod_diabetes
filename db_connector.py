@@ -1374,7 +1374,8 @@ def _build_cohort_id_sql(
     조합되면 월별 LIMIT/OFFSET 스캔을 키셋 기반 단일 쿼리로 대체한다.
 
     Args:
-        enroll_start / enroll_end: 진입기간 연도(포함).
+        enroll_start / enroll_end: 진입기간 연도(포함). YYYY(4자리) 또는 YYYYMM(6자리) 형식.
+            YYYY → YYYYMM01/12로 자동 변환. YYYYMM → 직접 사용.
         t20_*: T20 스키마·테이블명과 MDCARE_STRT_YYYYMM 컬럼 타입(INT/VARCHAR).
         form_cd_list / pay_yn: T20 청구 필터.
         use_hhdv: True 면 HHDV 와 JOIN 하여 연령·자격 필터 적용.
@@ -1390,9 +1391,23 @@ def _build_cohort_id_sql(
           ``LEFT(TRIM(col), 3) IN (...)`` 형태로 구성된다.
         - 식별자는 모두 ``"``로 quote하여 예약어 충돌을 방지한다.
     """
-    if int(enroll_start) > int(enroll_end):
+    # enroll_start/enroll_end: YYYY(4자리) 또는 YYYYMM(6자리) 형식 지원
+    enroll_start_str = str(enroll_start).strip()
+    enroll_end_str = str(enroll_end).strip()
+    if len(enroll_start_str) == 6:  # YYYYMM 직접 입력
+        month_lo = enroll_start_str
+        month_hi = enroll_end_str
+    elif len(enroll_start_str) == 4:  # YYYY → YYYYMM01/12 변환
+        month_lo = f"{enroll_start_str}01"
+        month_hi = f"{enroll_end_str}12"
+    else:
         raise ValueError(
-            f"enroll_start({enroll_start}) > enroll_end({enroll_end})"
+            f"enroll_start/enroll_end는 YYYY(4자리) 또는 YYYYMM(6자리) 형식이어야 합니다: "
+            f"start={enroll_start_str}, end={enroll_end_str}"
+        )
+    if int(month_lo) > int(month_hi):
+        raise ValueError(
+            f"month_lo({month_lo}) > month_hi({month_hi})"
         )
     # 식별자 검증 (_VALID_TABLE_RE와 동일 규칙)
     for ident in (t20_schema, t20_table, t20_monthly_col, hhdv_byear_col,
@@ -1403,9 +1418,6 @@ def _build_cohort_id_sql(
         for ident in (hhdv_schema, hhdv_table):
             if ident and not _VALID_TABLE_RE.match(str(ident)):
                 raise ValueError(f"유효하지 않은 HHDV 식별자: {ident!r}")
-
-    month_lo = f"{int(enroll_start):04d}01"
-    month_hi = f"{int(enroll_end):04d}12"
 
     # T20 월 경계 — 타입에 따라 리터럴 형태 결정
     if t20_monthly_is_int:
@@ -1454,8 +1466,8 @@ def _build_cohort_id_sql(
             f'a."{hhdv_std_col}" = t."{t20_monthly_col}"'
         )
     else:
-        year_lo = f"{int(enroll_start):04d}"
-        year_hi = f"{int(enroll_end):04d}"
+        year_lo = enroll_start_str[:4]  # YYYYMM/YYYY → 첫 4자리 = 연도
+        year_hi = enroll_end_str[:4]
         hhdv_month_clause = (
             f'a."{hhdv_std_col}" BETWEEN \'{year_lo}\' AND \'{year_hi}\''
         )
@@ -1558,14 +1570,15 @@ class CohortIDExtractor:
         return ids
 
     def extract(self, force=True, progress_callback=None):
-        """코호트 INDI_DSCM_NO를 단일 HANA SQL로 추출해 frozenset 반환.
+        """코호트 INDI_DSCM_NO를 분기별(3개월) 배치로 추출해 frozenset 반환.
 
         흐름:
           ① resume 모드(force=False) + 캐시 존재 → parquet 로드
-          ② `_build_cohort_id_sql` 로 HHDV × T20 서버측 JOIN SQL 구성
-          ③ `fetch_sql_keyset` 로 key 기반 페이징(최악의 경우에도 O(n))
-          ④ 전체 범위 실행 실패 시(OOM/timeout) 연단위 분할 fallback
-          ⑤ 결과를 cohort_ids.parquet 으로 저장
+          ② 월별 목록 생성 → 3개월씩 배치로 분할
+          ③ 각 배치별 HANA SQL 실행 (YYYYMM 범위)
+          ④ 개별 배치 실패 → 스킵(경고) + 계속 추출
+          ⑤ 연속 3회 배치 실패 → RuntimeError (조기 중단)
+          ⑥ 결과를 cohort_ids.parquet 으로 저장
 
         Args:
             force: True → 기존 캐시 무시하고 재추출.
@@ -1650,48 +1663,88 @@ class CohortIDExtractor:
             )
             logger.info("CohortIDExtractor: COHORT_USE_HHDV=False, T20 단독 모드")
 
-        # ── ① 전체 범위 단일 SQL ───────────────────────────────────────
+        # ── ① 월별 목록 생성 → 3개월 배치 분할 ────────────────────────────
+        months = self._enrollment_month_range()
+        _emit_progress(
+            progress_callback,
+            f"[코호트ID] 진입기간 {months[0][:4]}-{months[0][4:]}~{months[-1][:4]}-{months[-1][4:]} ({len(months)}개월) 분기별 추출 시작"
+        )
+        logger.info("CohortIDExtractor: 월별 배치 추출 시작, 총 %d개월", len(months))
+
         cohort_set: set = set()
-        try:
-            cohort_set = self._run_single_sql(
-                enroll_start, enroll_end, sql_kwargs,
-                progress_callback=progress_callback,
-                label=f"{enroll_start}~{enroll_end} 전체",
+        failed_batches = []
+        consecutive_failures = 0
+        _MAX_CONSECUTIVE_FAILURES = 3
+
+        # ── ② 3개월씩 배치 처리 ───────────────────────────────────────
+        BATCH_MONTHS = 3
+        for batch_idx in range(0, len(months), BATCH_MONTHS):
+            batch_months = months[batch_idx:batch_idx + BATCH_MONTHS]
+            batch_start = batch_months[0]  # YYYYMM
+            batch_end = batch_months[-1]    # YYYYMM
+            batch_label = f"{batch_start[:4]}-{batch_start[4:]}~{batch_end[:4]}-{batch_end[4:]}"
+
+            try:
+                batch_ids = self._run_single_sql(
+                    batch_start, batch_end, sql_kwargs,
+                    progress_callback=progress_callback,
+                    label=batch_label,
+                )
+                cohort_set.update(batch_ids)
+                consecutive_failures = 0  # 성공 시 카운터 리셋
+                _emit_progress(
+                    progress_callback,
+                    f"[코호트ID] {batch_label} 완료 — 누적 {len(cohort_set):,}명"
+                )
+            except Exception as batch_exc:
+                consecutive_failures += 1
+                failed_batches.append((batch_label, str(batch_exc)))
+                logger.warning(
+                    "CohortIDExtractor: 배치 추출 실패 [%s] (%s/%d) — %s",
+                    batch_label, consecutive_failures, _MAX_CONSECUTIVE_FAILURES, batch_exc,
+                )
+                _emit_progress(
+                    progress_callback,
+                    f"[코호트ID] {batch_label} 추출 실패 ({consecutive_failures}/{_MAX_CONSECUTIVE_FAILURES}) — 계속 진행"
+                )
+
+                # 연속 3회 실패 → 조기 중단
+                if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
+                    logger.error(
+                        "CohortIDExtractor: 연속 %d회 배치 실패, 조기 중단",
+                        _MAX_CONSECUTIVE_FAILURES,
+                    )
+                    raise RuntimeError(
+                        f"CohortIDExtractor: 연속 {_MAX_CONSECUTIVE_FAILURES}개 배치 추출 실패, 조기 중단\n"
+                        f"마지막 실패: {batch_label} — {batch_exc}\n"
+                        f"HANA 연결 상태 및 권한을 확인하세요."
+                    )
+
+        # 배치 실패율 판정
+        if failed_batches:
+            total_batches = (len(months) + BATCH_MONTHS - 1) // BATCH_MONTHS
+            failure_rate = len(failed_batches) / total_batches * 100
+            failure_summary = '\n'.join(
+                f"  • {label}: {err[:100]}" for label, err in failed_batches[:5]
             )
-        except Exception as exc:
-            # ── ② 연단위 분할 fallback ─────────────────────────────────
-            if enroll_end - enroll_start < 1:
-                # 단년도인데도 실패 → 전파
-                raise
-            logger.warning(
-                "CohortIDExtractor: 전체 범위 단일 SQL 실패(%s) — 연단위 분할 fallback 전환",
-                exc,
-            )
-            _emit_progress(
-                progress_callback,
-                "전체 범위 실행 실패 — 연단위 분할로 재시도합니다."
-            )
-            for year in range(enroll_start, enroll_end + 1):
-                try:
-                    year_ids = self._run_single_sql(
-                        year, year, sql_kwargs,
-                        progress_callback=progress_callback,
-                        label=f"{year}년",
-                    )
-                    cohort_set.update(year_ids)
-                    _emit_progress(
-                        progress_callback,
-                        f"코호트 ID 추출 {year}년 완료 — 누적 {len(cohort_set):,}명"
-                    )
-                except Exception as year_exc:
-                    logger.warning(
-                        "CohortIDExtractor: %d년 분할 추출 실패: %s — 해당 연도 스킵",
-                        year, year_exc,
-                    )
-                    _emit_progress(
-                        progress_callback,
-                        f"코호트 ID 추출 {year}년 [오류 스킵]"
-                    )
+            if failure_rate >= 20:
+                logger.error(
+                    "CohortIDExtractor: 배치 실패율 %.1f%% (경고: 코호트 데이터 손실 위험)\n%s",
+                    failure_rate, failure_summary
+                )
+                _emit_progress(
+                    progress_callback,
+                    f"[경고] 배치 실패율 {failure_rate:.1f}% — 결과 검증 필수"
+                )
+            else:
+                logger.warning(
+                    "CohortIDExtractor: 배치 실패율 %.1f%% (부분 손실)\n%s",
+                    failure_rate, failure_summary
+                )
+                _emit_progress(
+                    progress_callback,
+                    f"[경고] 배치 실패율 {failure_rate:.1f}% — 일부 기간 데이터 미포함"
+                )
 
         if not cohort_set:
             mode = "HHDV+T20" if use_hhdv else "T20(NHISBASE.TBGJME20) 단독"
