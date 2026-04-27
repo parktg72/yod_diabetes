@@ -773,8 +773,20 @@ class DataLoadTab(QWidget):
                 continue
             if src == 'HANA 월별 (BFC)':
                 # JK 전용: HHDT_POPULATION_MM + HHDT_DSES_YY 월별 조인 추출
-                # path = 스키마명 오버라이드 (예: 'NHISBDA') 또는 빈 문자열(config 기본값 사용)
-                load_cfg[tname] = {'type': 'hana_monthly_jk', 'schema_override': path}
+                # path 허용 형식:
+                #   ''                              → STUDY_SETTINGS 기본값 사용
+                #   'NHISBDA'                       → schema만 오버라이드, table은 기본값
+                #   'NHISBDA.HHDT_POPULATION_MM'    → schema + pop_table 오버라이드
+                # 점 분리 후 식별자 검증은 MonthlyJKExtractor.__init__에서 수행
+                if '.' in path:
+                    jk_schema, jk_pop_table = path.split('.', 1)
+                else:
+                    jk_schema, jk_pop_table = path, ''
+                load_cfg[tname] = {
+                    'type': 'hana_monthly_jk',
+                    'schema_override': jk_schema,
+                    'pop_table_override': jk_pop_table,
+                }
             elif src == 'HANA DB':
                 if '.' in path:
                     hana_schema, hana_table = path.split('.', 1)
@@ -824,16 +836,19 @@ class DataLoadTab(QWidget):
                             dm.connect_hana(hana_host, int(hana_port),
                                              hana_user, hana_pass)
                         schema_override = src.get('schema_override') or ''
-                        # schema_override는 UI에서 단일 스키마를 입력했을 때 사용
+                        pop_table_override = src.get('pop_table_override') or ''
+                        # schema_override는 UI에서 스키마를 입력했을 때 사용
                         # 두 테이블이 다른 스키마에 있으면 STUDY_SETTINGS로 개별 설정
                         pop_schema = schema_override or STUDY_SETTINGS.get('JK_POPULATION_SCHEMA', 'NHISBDA')
                         dses_schema = STUDY_SETTINGS.get('JK_DSES_SCHEMA', schema_override or 'NHISBDA')
+                        # pop_table_override는 'SCHEMA.TABLE' 입력 시 분리된 테이블명
+                        pop_table = pop_table_override or STUDY_SETTINGS.get('JK_POPULATION_TABLE', 'HHDT_POPULATION_MM')
                         extractor = MonthlyJKExtractor(
                             hana_connector=dm.hana,
                             duckdb_storage=dm.storage,
                             cache_root=_get_hana_cache_dir(),
                             pop_schema=pop_schema,
-                            pop_table=STUDY_SETTINGS.get('JK_POPULATION_TABLE', 'HHDT_POPULATION_MM'),
+                            pop_table=pop_table,
                             dses_schema=dses_schema,
                             dses_table=STUDY_SETTINGS.get('JK_DSES_TABLE', 'HHDT_DSES_YY'),
                         )
