@@ -624,7 +624,16 @@ class DataLoadTab(QWidget):
             path_edit = QLineEdit()
             if tname == 'JK':
                 path_edit.setPlaceholderText(
-                    "HANA 월별: NHISBDA (스키마명) | HANA DB: SCHEMA.TABLE | 파일경로"
+                    "HANA 월별: NHISBDA 또는 NHISBDA.HHDT_POPULATION_MM | HANA DB: SCHEMA.TABLE | 파일경로"
+                )
+                path_edit.setToolTip(
+                    "HANA 월별 (BFC) 입력 형식:\n"
+                    "  • 빈칸 → 기본값 사용 (NHISBDA.HHDT_POPULATION_MM + NHISBDA.HHDT_DSES_YY)\n"
+                    "  • 'NHISBDA' → 스키마만 오버라이드 (테이블명 기본값)\n"
+                    "  • 'NHISBDA.HHDT_POPULATION_MM' → 스키마 + pop_table 오버라이드\n"
+                    "\n"
+                    "주의: 점(.) 형식은 pop_table에만 적용됩니다.\n"
+                    "      dses_table을 변경하려면 STUDY_SETTINGS의 JK_DSES_TABLE을 수정하세요."
                 )
             else:
                 path_edit.setPlaceholderText("HANA 테이블명 또는 파일경로 (분할파일: 세미콜론 구분)")
