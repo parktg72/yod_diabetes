@@ -593,6 +593,43 @@ class TestMergeAllVariables:
 # ---------------------------------------------------------------------------
 # 8. End-to-End: generate_all
 # ---------------------------------------------------------------------------
+class TestMissingDataStrategy:
+    def _prepare_for_merge(self, vg):
+        vg.generate_demographics()
+        vg.generate_health_behaviors()
+        vg._create_t40_filtered()
+        vg.generate_comorbidities()
+        vg.generate_dm_complications()
+        vg.generate_dm_duration()
+        vg.generate_cci()
+        vg._drop_t40_filtered()
+
+    def test_merge_all_variables_without_med_switch_creates_null_med_switch_date(self, dm, vg):
+        self._prepare_for_merge(vg)
+        assert not dm._table_exists('med_switch')
+
+        vg.merge_all_variables()
+
+        cols = dm.query("SELECT * FROM final_analysis LIMIT 0").columns
+        assert 'med_switch_date' in cols
+        null_count = dm.query("SELECT COUNT(*) FROM final_analysis WHERE med_switch_date IS NULL").iloc[0, 0]
+        assert null_count == 3
+
+    def test_multiple_imputation_fallback_does_not_mutate_global_setting(self, dm, vg, monkeypatch):
+        self._prepare_for_merge(vg)
+        vg.merge_all_variables()
+
+        from variable_generator import STUDY_SETTINGS
+        original = STUDY_SETTINGS.get('MISSING_DATA_STRATEGY', 'complete_case')
+        monkeypatch.setitem(STUDY_SETTINGS, 'MISSING_DATA_STRATEGY', 'multiple_imputation')
+
+        vg.apply_missing_data_strategy()
+
+        assert STUDY_SETTINGS['MISSING_DATA_STRATEGY'] == 'multiple_imputation'
+        # cleanup for test isolation
+        monkeypatch.setitem(STUDY_SETTINGS, 'MISSING_DATA_STRATEGY', original)
+
+
 class TestGenerateAll:
     def test_generate_all_returns_count(self, dm, vg):
         """generate_all → final_analysis 생성 후 행 수 반환 (complete-case: 3→2명)"""

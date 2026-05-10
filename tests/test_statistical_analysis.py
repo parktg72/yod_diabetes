@@ -13,11 +13,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import pytest
-import pandas as pd
-import numpy as np
 import logging
 from db_connector import DataManager
-from cohort_builder import CohortBuilder
 from statistical_analysis import StatisticalAnalyzer
 
 logger = logging.getLogger(__name__)
@@ -25,17 +22,154 @@ logger = logging.getLogger(__name__)
 
 @pytest.fixture
 def dm_with_phase2_data():
-    """Phase 2 변수 포함 테스트 데이터 생성"""
+    """Phase 2 변수 포함 synthetic 테스트 데이터 생성 (코호트 빌더 비의존)"""
     dm = DataManager(':memory:')
-    cb = CohortBuilder(dm)
 
-    # 기본 코호트 구성
-    cb.step1_base_population()
-    cb.step2_dm_claims()
-    cb.step3_dm_medications()
-    cb.step4_classify_groups(lookback_days=90)
-    cb.step5_exclude_dementia()
-    cb.step6_outcomes()
+    # 35건 synthetic analysis_data (MIN_VALID_ROWS=30 충족)
+    dm.execute("""
+        CREATE OR REPLACE TABLE analysis_data AS
+        SELECT
+            printf('P%04d', i) AS INDI_DSCM_NO,
+            CASE
+                WHEN i BETWEEN 1 AND 7 THEN 'T1DM'
+                WHEN i BETWEEN 8 AND 14 THEN 'T2DM_OHA'
+                WHEN i BETWEEN 15 AND 21 THEN 'T2DM_INSULIN'
+                WHEN i BETWEEN 22 AND 28 THEN 'T2DM_NOMED'
+                ELSE 'NON_DM'
+            END AS exposure_group,
+            CASE WHEN i % 2 = 0 THEN '1' ELSE '2' END AS SEX_TYPE,
+            2018 + (i % 3) AS index_year,
+            CAST(100 + i AS INTEGER) AS follow_up_days,
+            CAST((100 + i) / 365.25 AS DOUBLE) AS follow_up_years,
+            CASE WHEN i % 6 = 0 THEN 1 ELSE 0 END AS dementia_event,
+            printf('%04d%02d%02d', 2019, 1 + (i % 9), 1 + (i % 20)) AS index_date,
+            CASE
+                WHEN i IN (1, 3, 9, 13, 15, 19, 24) THEN printf('%04d%02d%02d', 2018, 1 + (i % 9), 1 + (i % 20))
+                ELSE NULL
+            END AS insulin_start_date
+        FROM range(1, 36) t(i)
+    """)
+
+    # VariableGenerator.merge_all_variables() 최소 입력 테이블 생성
+    dm.execute("""
+        CREATE OR REPLACE TABLE demo_vars AS
+        SELECT
+            INDI_DSCM_NO,
+            45 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 20) AS age_at_index,
+            CASE
+                WHEN 45 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 20) < 50 THEN '40s'
+                WHEN 45 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 20) < 60 THEN '50s'
+                ELSE '60+'
+            END AS age_group,
+            1 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 5) AS income_quintile,
+            'NHI' AS insurance_type,
+            '11' AS region_code
+        FROM analysis_data
+    """)
+
+    dm.execute("""
+        CREATE OR REPLACE TABLE health_exam_final AS
+        SELECT
+            INDI_DSCM_NO,
+            23.0 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 5) * 0.3 AS bmi,
+            120 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 10) AS sbp,
+            75 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 8) AS dbp,
+            95 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 15) AS fbs,
+            190 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 20) AS total_chol,
+            130 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 30) AS tg,
+            48 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 7) AS hdl,
+            110 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 12) AS ldl,
+            0.9 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 4) * 0.05 AS creatinine,
+            85 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 10) AS egfr,
+            14.0 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 3) * 0.2 AS hemoglobin,
+            22 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 6) AS ast,
+            24 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 6) AS alt,
+            30 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 8) AS ggt,
+            'normal' AS bmi_cat
+        FROM analysis_data
+    """)
+
+    dm.execute("""
+        CREATE OR REPLACE TABLE quest_final AS
+        SELECT
+            INDI_DSCM_NO,
+            CASE WHEN CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 4 = 0 THEN 'Current'
+                 WHEN CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 4 = 1 THEN 'Former'
+                 ELSE 'Never' END AS smoking_status,
+            CASE WHEN CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 3 = 0 THEN 'Heavy'
+                 WHEN CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 3 = 1 THEN 'Moderate'
+                 ELSE 'Non' END AS drinking_status
+        FROM analysis_data
+    """)
+
+    dm.execute("""
+        CREATE OR REPLACE TABLE comorbidity_vars AS
+        SELECT
+            INDI_DSCM_NO,
+            (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 2) AS comor_hypertension,
+            (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 3 = 0)::INTEGER AS comor_dyslipidemia,
+            0 AS comor_ischemic_stroke,
+            0 AS comor_hemorrhagic_stroke,
+            0 AS comor_tia,
+            (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 5 = 0)::INTEGER AS comor_depression,
+            0 AS comor_anxiety,
+            0 AS comor_hypothyroidism,
+            0 AS comor_obesity,
+            0 AS comor_ckd,
+            0 AS comor_ihd,
+            0 AS comor_atrial_fib,
+            0 AS comor_heart_failure,
+            0 AS comor_pvd
+        FROM analysis_data
+    """)
+
+    dm.execute("""
+        CREATE OR REPLACE TABLE complication_vars AS
+        SELECT
+            INDI_DSCM_NO,
+            0 AS comp_retinopathy,
+            0 AS comp_nephropathy,
+            0 AS comp_neuropathy,
+            0 AS comp_foot,
+            (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 7 = 0)::INTEGER AS comp_hypoglycemia
+        FROM analysis_data
+    """)
+
+    dm.execute("""
+        CREATE OR REPLACE TABLE dm_duration_vars AS
+        SELECT
+            INDI_DSCM_NO,
+            CASE WHEN exposure_group = 'NON_DM' THEN NULL ELSE (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 8) + 1 END AS dm_duration_years,
+            CASE WHEN exposure_group = 'NON_DM' THEN NULL
+                 WHEN (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 8) + 1 < 3 THEN 'lt3'
+                 WHEN (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 8) + 1 < 6 THEN '3to5'
+                 ELSE 'ge6' END AS dm_duration_cat
+        FROM analysis_data
+    """)
+
+    dm.execute("""
+        CREATE OR REPLACE TABLE cci_vars AS
+        SELECT
+            INDI_DSCM_NO,
+            (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 4) AS cci_score,
+            CASE
+                WHEN (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 4) = 0 THEN '0'
+                WHEN (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 4) = 1 THEN '1'
+                ELSE '2+'
+            END AS cci_category
+        FROM analysis_data
+    """)
+
+    # OHA/NOMED 일부만 insulin switch 입력. T1DM/T2DM_INSULIN에는 미입력.
+    dm.execute("""
+        CREATE OR REPLACE TABLE med_switch AS
+        SELECT
+            INDI_DSCM_NO,
+            printf('%04d%02d%02d', 2020, 1 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 9), 1 + (CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 20)) AS insulin_switch_date
+        FROM analysis_data
+        WHERE exposure_group IN ('T2DM_OHA', 'T2DM_NOMED')
+          AND CAST(SUBSTR(INDI_DSCM_NO,2) AS INTEGER) % 2 = 0
+    """)
 
     return dm
 
@@ -48,7 +182,7 @@ class TestPhase2DataIntegration:
         dm = dm_with_phase2_data
         assert dm.storage.table_exists('analysis_data')
 
-        cols = dm.execute("SELECT * FROM analysis_data LIMIT 0").columns
+        cols = dm.query("SELECT * FROM analysis_data LIMIT 0").columns
         assert 'insulin_start_date' in cols, "insulin_start_date 컬럼 누락"
 
     def test_med_switch_date_in_final_analysis(self, dm_with_phase2_data):
@@ -58,7 +192,7 @@ class TestPhase2DataIntegration:
         vg = VariableGenerator(dm)
         vg.merge_all_variables()
 
-        cols = dm.execute("SELECT * FROM final_analysis LIMIT 0").columns
+        cols = dm.query("SELECT * FROM final_analysis LIMIT 0").columns
         assert 'med_switch_date' in cols, "med_switch_date 컬럼 누락"
 
         # NULL이 허용되어야 함 (모든 환자가 약물전환하지 않음)

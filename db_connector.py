@@ -2529,9 +2529,13 @@ class DataManager:
     """통합 데이터 관리자"""
 
     def __init__(self, work_dir='./work'):
-        self.work_dir = Path(work_dir)
-        self.work_dir.mkdir(parents=True, exist_ok=True)
-        self.duckdb_path = str(self.work_dir / 'nhis_analysis.duckdb')
+        if str(work_dir) == ':memory:':
+            self.work_dir = None
+            self.duckdb_path = ':memory:'
+        else:
+            self.work_dir = Path(work_dir)
+            self.work_dir.mkdir(parents=True, exist_ok=True)
+            self.duckdb_path = str(self.work_dir / 'nhis_analysis.duckdb')
         self.storage = DuckDBStorage(self.duckdb_path)
         self.hana = None
         self.sas_loader = SASFileLoader()

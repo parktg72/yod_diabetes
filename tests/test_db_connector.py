@@ -922,6 +922,27 @@ class TestLoadTableCohortIDsFilter:
         ), f"where_clause AND cohort_ids 결합 필요. 캡처된 WHERE: {captured_wheres}"
 
 
+class TestDataManagerWorkDirMemory:
+    """DataManager(':memory:') 계열 입력은 디렉터리를 만들지 않고 in-memory DB를 사용한다."""
+
+    def test_memory_work_dir_uses_in_memory_duckdb_and_skips_mkdir(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        dm = DataManager(work_dir=':memory:')
+
+        assert dm.storage.db_path == ':memory:'
+        assert not (tmp_path / ':memory:').exists()
+
+    def test_memory_work_dir_pathlike_uses_in_memory_duckdb_and_skips_mkdir(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+
+        dm = DataManager(work_dir=Path(':memory:'))
+
+        assert dm.storage.db_path == ':memory:'
+        assert dm.work_dir is None
+        assert not (tmp_path / ':memory:').exists()
+
+
 class TestDataManagerConnectHana:
     """Fix H-1: connect_hana가 실패하면 self.hana를 None으로 리셋한다."""
 
