@@ -580,3 +580,10 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
 - Codex first-review result:
   - PASS.
   - Ready for Claude second review.
+
+### 2026-05-11 - R3 문서화: ⚠️ 권한 항목 커밋 승인 기록 의무
+
+- `AGENTS.md` 권한(표준 B) 표 아래에 승인 기록 의무 노트 추가.
+- `AGENTS.md` 금지 사항에 `⚠️` 항목 무승인 커밋 금지 1줄 추가.
+- 변경 범위는 문서 파일(`AGENTS.md`, 본 로그)로 제한.
+- 검증: `git diff --check` 실행, 가능 시 전체 테스트 기준선(`427 passed`) 재확인.

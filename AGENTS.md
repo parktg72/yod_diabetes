@@ -76,6 +76,10 @@ grep -n "def run_cox" statistical_analysis.py
 | `requirements*.txt` 패키지 추가/제거 | ⚠️ 사용자 확인 필요 |
 | 스키마/DB 구조 변경 | ⚠️ 사용자 확인 필요 |
 
+> **⚠️ 항목 변경 시**: 커밋 전 사용자 명시 승인 필수.
+> 승인 원문(사용자 메시지 원문), 승인 시각, 채널(예: Claude 대화, 터미널)을
+> 커밋 메시지 또는 PR 본문에 기록한다.
+
 ### 4. Windows 호환성
 
 - 모든 경로: `pathlib.Path` 사용 (`os.path` 지양)
@@ -122,3 +126,4 @@ chore: requirements.txt pywin32 추가
 - 테스트 통과 전 커밋 금지
 - `hdbcli`를 `requirements.txt`에 추가 금지 (선택 의존성)
 - 클래스명/함수명 추측 작성 금지 → grep 확인 필수
+- `⚠️` 항목 변경을 사용자 명시 승인 없이 커밋 금지
