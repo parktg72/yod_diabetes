@@ -151,6 +151,8 @@ def test_run_cox_skips_model_with_insufficient_rows_continues_loop():
         f"InsufficientDataError 발생 model1 이 결과에 포함됨"
     assert len([k for k in result if k.startswith('model')]) >= 1, \
         f"model1 스킵 후 다른 모델이 실행되지 않음: {list(result.keys())}"
+    assert result['failed_models']['model1_age_sex']['reason_code'] == 'INSUFFICIENT_DATA'
+    assert '데이터 부족' in result['failed_models']['model1_age_sex']['reason']
 
 
 def test_psm_warns_when_pooled_sd_is_nan(caplog):

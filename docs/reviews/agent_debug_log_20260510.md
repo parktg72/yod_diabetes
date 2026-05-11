@@ -223,3 +223,360 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
 - User corrected commit option 2:
   - Final selection: `2-A`, do not insert `Co-Authored-By` trailers.
 - If commit access is restored, create the 4 selected commits without co-author trailers.
+
+### 2026-05-10 - A 작업 착수: immortal time bias baseline 공변량 가드
+
+- User selected next task:
+  - A: Phase 2 약물전환 변수의 immortal time bias 방지.
+- Agent coordination:
+  - Codex checked pending bridge messages before dispatch.
+  - Hermes was asked to implement the TDD change.
+  - Hermes edited files but the bridge job ended with timeout code `124`, so no final Hermes summary was received.
+- Hermes/Codex changes:
+  - `statistical_analysis.py`
+    - Added `_ITB_REASON_CODE = 'ITB_POST_INDEX_COVARIATE'`.
+    - Added `_POST_INDEX_COVARIATES` for post-index medication-switch variables.
+    - Added `_assert_no_post_index_covariates`.
+    - Added guard calls in `run_cox` model covariates and `run_psm` PS covariates.
+  - `tests/test_stage_n.py`
+    - Added regression tests for `run_psm` and `run_cox` guard paths.
+    - Codex first review added direct tests that `baseline_has_insulin` remains allowed and actual Phase 2 post-index covariates are reported with the reason code.
+- Codex verification:
+  - `pytest tests/test_stage_n.py -q` -> `15 passed`
+  - `pytest tests/ -q` -> `407 passed`
+- Codex first-review result:
+  - PASS after adding direct guard coverage.
+  - Ready for Claude second review.
+
+### 2026-05-10 - Claude 2차 리뷰 수신 (A 작업)
+
+- Codex checked pending bridge messages before contacting Claude.
+- First Claude review request timed out after 110 seconds; Codex checked pending messages before retrying with a shorter request.
+- Claude decision: PASS, approved.
+- Blocking findings: none.
+- Claude review notes:
+  - `run_cox` and `run_psm` guard placement is appropriate.
+  - `run_subgroup` and competing-risk paths do not require the baseline covariate guard in this round.
+  - Hard-fail `ValueError` with `ITB_POST_INDEX_COVARIATE` is acceptable for R1.
+- Non-blocking follow-up applied:
+  - `AGENTS.md` baseline updated from `403 passed` to `407 passed`.
+  - `run_subgroup` LRT section now warns that `had_insulin_switch` is post-index and only for interaction testing, not static HR covariate interpretation.
+- Final Codex verification:
+  - `pytest tests/ -q` -> `407 passed`
+- Hermes final acknowledgment:
+  - Codex checked pending messages before dispatching the final status.
+  - Hermes response: PASS, no blocking objection.
+
+### 2026-05-10 - R2-1 착수: 명시적 skip reason_code 표준화
+
+- User requested next work after A; Codex proceeded with the previously recommended next item.
+- Scope agreed with Claude and Hermes:
+  - Add machine-readable `reason_code` and optional `stage` to explicit skip dictionaries.
+  - Preserve existing `reason` keys and return shapes.
+  - Include `run_psm`, `run_interaction`, `run_competing_risks`, and `run_cross_validation`.
+  - Defer `run_cox failed_models` structure changes and broad `except Exception` standardization to later rounds.
+- Changes:
+  - `statistical_analysis.py`
+    - Added `_skip_result(reason_code, reason, *, stage=None, **extra)`.
+    - Added reason code constants for insufficient data/groups, invalid PSM caliper, no PSM matches, missing required columns, and missing upstream results.
+    - Updated explicit skip result creation in R2-1 scope to include `reason_code` and `stage`.
+  - `tests/test_stage_n.py`
+    - Added helper schema test.
+    - Extended PSM and interaction skip tests to assert `reason_code`/`stage`.
+    - Added competing-risk missing-column and cross-validation missing-upstream skip tests.
+  - `AGENTS.md`
+    - Baseline updated from `407 passed` to `410 passed`.
+- Codex verification:
+  - `pytest tests/test_stage_n.py -q` -> `18 passed`
+  - `pytest tests/ -q` -> `410 passed`
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-11 - Claude 2차 리뷰 수신 (R2-3c follow-up)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - `_build_step_failure_message` implementation and legacy body formatting are acceptable.
+  - `_on_post_analysis` single-popup integration with `setDetailedText` is acceptable.
+  - Details-only fallback body is acceptable.
+- Non-blocking follow-up candidates:
+  - Add coverage for non-dict `step_error_details` detail values later.
+  - Consider explicit `str(detail)` in the non-dict detail fallback branch later.
+  - Keep helper consolidation and `tabs.py` broad exception cleanup as separate rounds.
+
+### 2026-05-11 - Claude 2차 리뷰 수신 (R2-3c)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - `_format_error_details` lenient formatting and truncation are acceptable.
+  - `log_signal.emit` plus `analysis_text.append` is acceptable because they target different display surfaces.
+- Non-blocking follow-up candidates:
+  - Expose `step_error_details` in the GUI as a later R2-3c sub-round.
+  - Consolidate error-result helpers in a later mini-cleanup.
+  - Handle `tabs.py` broad exception paths later with manual GUI QA.
+
+### 2026-05-11 - R2-3c follow-up: step_error_details GUI 상세 표시
+
+- Scope agreed with Claude:
+  - Expose `run_selected` `step_error_details` in the existing analysis-step failure warning.
+  - Keep a single popup by using `QMessageBox.setDetailedText`.
+  - Defer `tabs.py` broad exception cleanup and helper consolidation.
+- Hermes coding:
+  - First Hermes job timed out with code `124` after adding tests only.
+  - Codex first review found `_build_step_failure_message` missing and requested a targeted fix.
+  - Hermes added `_build_step_failure_message(step_errors, step_error_details)`.
+  - Codex first review then found the helper was not wired into `_on_post_analysis`.
+  - Hermes replaced the legacy `QMessageBox.warning` step-error block with a helper-based `QMessageBox` instance and `setDetailedText`.
+- Tests:
+  - `tests/test_stage_s.py` now covers step-errors-only, step-errors plus structured details, details-only, and empty-input cases.
+- Codex verification:
+  - `pytest tests/test_stage_s.py -q` -> `11 passed`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/pycache python3 -m py_compile tabs.py` -> pass
+  - `pytest tests/ -q` -> `427 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-11 - Claude 2차 리뷰 수신 (R2-3b)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - Compatibility finding:
+    - Legacy `errors: list[str]` is preserved for current consumers.
+    - New `error_details: list[dict]` is additive and safe for `tabs.py` callers.
+  - Helper finding:
+    - `analysis_runner.make_error_result` is acceptable for this round.
+    - A later mini-cleanup can consolidate helper definitions across modules.
+- Hermes bridge status:
+  - Hermes jobs timed out with code `124`, but code changes were present.
+  - Codex first review caught the initial missing `error_details` implementation, requested correction, and verified the final result locally.
+- Deferred work:
+  - Helper location unification before or during R2-3c.
+  - Optional GUI display of `error_details`.
+  - R2-3c `tabs.py` exception standardization with manual UI QA.
+
+### 2026-05-11 - R2-3b: analysis_runner.py 후처리 오류 상세 구조화
+
+- Scope agreed with Claude:
+  - Process `analysis_runner.py` broad `except` paths before `tabs.py`.
+  - Preserve the legacy `errors: list[str]` return value.
+  - Add `error_details: list[dict]` as additive structured metadata.
+- Hermes coding:
+  - Added `make_error_result(reason_code, error, *, stage=None, **extra)` in `analysis_runner.py`.
+  - Added `error_details` to `run_post_analysis` return shape.
+  - Added reason codes for all six post-analysis broad exception paths:
+    - `VIZ_KM_ERROR`
+    - `VIZ_FOREST_ERROR`
+    - `VIZ_PSM_BALANCE_ERROR`
+    - `VIZ_LOVE_ERROR`
+    - `VIZ_CIF_ERROR`
+    - `EXPORT_ERROR`
+  - Existing string `errors` messages and logging remain unchanged.
+- Tests:
+  - `tests/test_analysis_runner.py` now verifies KM `error_details`.
+  - Added mapping coverage for all six post-analysis reason codes.
+  - Return-shape test now asserts `error_details` is present and empty on success.
+- Codex verification:
+  - `pytest tests/test_analysis_runner.py -q` -> `8 passed`
+  - `pytest tests/ -q` -> `419 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-11 - Claude 2차 리뷰 수신 (R2-3a second pass)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - Collaboration finding: workflow followed the requested pipeline: Hermes coding, Codex first review, Claude second review.
+  - Compatibility finding:
+    - Legacy `step_errors` string dictionary is preserved for existing consumers.
+    - New `step_error_details` carries structured metadata.
+    - Sensitivity exporter compatibility is preserved by keeping existing scalar `error` fields and separating cutoff Cox `failed_models` from `cox_results`.
+- Helper selection guide for follow-up rounds:
+  - `_skip_result`: condition-based skip where analysis is not attempted.
+  - `_model_failure`: model-level failure, currently Cox and sensitivity-cutoff Cox.
+  - `_error_result`: exception-based analysis or pipeline failure.
+- Deferred work:
+  - Re-count and handle remaining `statistical_analysis.py` broad `except` sites.
+  - R2-3b for `analysis_runner.py`.
+  - R2-3c for `tabs.py`, including possible UI display of `step_error_details`.
+
+### 2026-05-11 - Claude/Hermes 리뷰 수신 (R2-2)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - Compatibility finding: both `statistical_analysis.py` partial-failure logging and `tabs.py` Cox warning display now handle structured dict values and legacy string values.
+  - Non-blocking follow-up: consider a dedicated `AllCoxModelsFailedError` class in a later round; consider an explicit all-success regression test for absent `failed_models`.
+- Hermes final acknowledgment:
+  - Codex checked pending messages before dispatching the final status.
+  - Hermes response: PASS, no blocking objection.
+- Deferred work:
+  - R2-3 broad `except Exception` standardization.
+  - Optional all-success `run_cox` regression test.
+
+### 2026-05-11 - 다음 업무 협의 및 R2-2 all-success 회귀 테스트
+
+- User asked Codex to discuss next work with Claude and proceed.
+- Codex checked pending bridge messages before contacting Claude.
+- Claude recommendation:
+  - PASS on doing the low-cost `run_cox` all-success regression test first.
+  - Then proceed to R2-3a, limited to `statistical_analysis.py` broad `except Exception` standardization.
+  - Defer `analysis_runner.py` and `tabs.py` exception standardization to later rounds.
+- Changes:
+  - `tests/test_stage_n.py`
+    - Added `test_run_cox_all_models_succeed_has_no_failed_models_key`.
+    - Verifies all three Cox models can succeed and `failed_models` is absent on the clean success path.
+  - `AGENTS.md`
+    - Baseline updated from `411 passed` to `412 passed`.
+- Codex verification:
+  - `pytest tests/test_stage_n.py -q` -> `19 passed`
+  - `pytest tests/ -q` -> `412 passed`
+- Next agreed task:
+  - R2-3a: standardize broad `except Exception` handling in `statistical_analysis.py` only.
+
+### 2026-05-11 - R2-3a 착수: statistical_analysis.py explicit error-result 표준화
+
+- Scope:
+  - Limited to `statistical_analysis.py`.
+  - First pass focuses on broad/exception paths that return or persist user-visible result dictionaries.
+  - Helper-only `NaN` fallbacks, cleanup-only fallbacks, and pipeline-level `run_selected` step error restructuring are deferred.
+- Changes:
+  - `statistical_analysis.py`
+    - Added `_error_result(reason_code, error, *, stage=None, **extra)`.
+    - Added reason codes: `ANALYSIS_ERROR`, `CROSS_VALIDATION_ERROR`, `SENSITIVITY_ERROR`.
+    - `run_interaction` model-fit errors now store a structured skipped result with `ANALYSIS_ERROR`.
+    - `run_cross_validation` per-outcome errors now include `CROSS_VALIDATION_ERROR`, `stage`, `reason`, and `exception_type`.
+    - `run_sensitivity` unexpected anti-dementia-drug query errors now include `SENSITIVITY_ERROR`, `stage`, `reason`, and `exception_type`.
+  - `tests/test_stage_n.py`
+    - Added regression coverage for the three explicit error-result paths.
+  - `AGENTS.md`
+    - Baseline updated from `412 passed` to `415 passed`.
+- Codex verification:
+  - `pytest tests/test_stage_n.py -q` -> `22 passed`
+  - `pytest tests/test_stage_n.py tests/test_results_exporter.py tests/test_run_selected.py -q` -> `41 passed`
+  - `pytest tests/ -q` -> `415 passed`
+- Codex first-review result:
+  - PASS for the scoped first pass.
+  - Ready for Claude review, including whether to continue with remaining log-only/cleanup-only broad `except` paths in a follow-up.
+
+### 2026-05-11 - Claude/Hermes 리뷰 수신 (R2-3a first pass)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - Scope finding: first pass correctly covers pattern A, explicit result persistence paths; do not expand the same round to all remaining broad `except` sites.
+  - Remaining broad `except` sites should be handled later by pattern:
+    - `_skip_result`: condition-based skip where analysis is not attempted.
+    - `_model_failure`: Cox model-level failure.
+    - `_error_result`: exception-based analysis failure.
+- Hermes final acknowledgment:
+  - Codex checked pending messages before dispatching the final status.
+  - Hermes response: PASS, no blocking objection.
+- Deferred work:
+  - R2-3a second pass for remaining `statistical_analysis.py` broad `except` patterns B/C/D.
+  - R2-3b for `analysis_runner.py`.
+  - R2-3c for `tabs.py` UI-layer exception standardization.
+
+### 2026-05-11 - R2-3a second pass: Hermes 코딩 및 Codex 1차 리뷰
+
+- User clarified workflow:
+  - Discuss work with Claude.
+  - Hermes performs coding.
+  - Codex performs first review.
+  - Claude performs second review.
+- Codex checked pending bridge messages before contacting Hermes.
+- Hermes coding scope:
+  - `run_selected` step error detail structuring while preserving legacy `step_errors`.
+  - `run_sensitivity` follow-up cutoff outer exception metadata.
+  - `run_sensitivity` cutoff Cox per-exposure failure metadata.
+- Hermes initial job timed out with code `124`, but file changes were present.
+- Codex first-review RED:
+  - Missing `reason_code` in follow-up cutoff outer exception result.
+  - Missing cutoff Cox `failed_models`.
+  - Then missing `exception_type` in cutoff Cox failure detail.
+- Hermes follow-up fixes:
+  - `step_error_details` added alongside legacy `step_errors`.
+  - Follow-up cutoff outer exception now includes `SENSITIVITY_ERROR`, `stage`, `reason`, and `exception_type`.
+  - Cutoff Cox per-exposure failures now use `_model_failure` with `COX_MODEL_FAILED`, `stage='sensitivity_cutoff_cox'`, `model`, `cutoff_year`, and `exception_type`.
+- Codex verification:
+  - `pytest tests/test_run_selected.py tests/test_stage_n.py tests/test_results_exporter.py -q` -> `44 passed`
+  - `pytest tests/ -q` -> `418 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-10 - Claude/Hermes 리뷰 수신 (R2-1)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - Compatibility finding: existing `skipped`/`reason` keys, `self.results` storage, and return shapes are preserved; only additive metadata was added.
+  - Follow-up kept for later: `run_cox failed_models` structure and broad `except Exception` reason-code standardization.
+- Hermes final acknowledgment:
+  - Codex checked pending messages before dispatching the final status.
+  - Hermes response: PASS, no blocking objection.
+
+### 2026-05-11 - R2-2 착수: run_cox failed_models reason_code 구조화
+
+- User requested R2-2:
+  - Structure `run_cox failed_models` around machine-readable reason codes.
+- Scope agreed with Claude and Hermes:
+  - Convert `failed_models[model_name]` from legacy string values to structured dicts.
+  - Preserve the top-level `failed_models` result key.
+  - Record PH-assumption model exclusion in `failed_models`.
+  - Preserve existing all-model-failure `RuntimeError` behavior, but attach `reason_code` and `failed_models`.
+  - Keep model-level `RuntimeError` re-raise behavior out of scope.
+- Claude blocking dependency:
+  - `tabs.py` consumed `failed_models` as strings via `reason[:80]`.
+  - R2-2 includes GUI formatting compatibility for both legacy strings and structured dicts.
+- Changes:
+  - `statistical_analysis.py`
+    - Added `_model_failure(reason_code, reason, *, stage='cox', **extra)`.
+    - Added Cox reason codes: `COX_MODEL_FAILED`, `PH_VIOLATION`, `ALL_COX_MODELS_FAILED`.
+    - Updated insufficient-data, model-fit failure, broad model failure, and PH violation paths to populate structured `failed_models`.
+    - Added `reason_code` and `failed_models` attributes to all-model-failure `RuntimeError`; the message also includes `ALL_COX_MODELS_FAILED`.
+    - Updated partial-failure logging to format structured entries.
+  - `tabs.py`
+    - Added `_format_cox_failed_model_reason` for legacy string and structured dict compatibility.
+    - Updated Cox partial-failure warning construction to use the formatter.
+  - Tests:
+    - Extended all-model-failure test to assert exception `reason_code` and structured `failed_models`.
+    - Extended PH violation test to assert `PH_VIOLATION`.
+    - Extended partial insufficient-data test to assert `INSUFFICIENT_DATA`.
+    - Added `tabs.py` formatter compatibility test.
+- Codex verification:
+  - `pytest tests/test_stage_n.py tests/test_stage_o.py tests/test_stage_qr.py -q` -> `41 passed, 3 warnings`
+  - `pytest tests/ -q` -> `411 passed`
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-11 - R2-3c: tabs.py 후처리 오류 상세 표시
+
+- Scope agreed with Claude:
+  - Expose `run_post_analysis` structured `error_details` in the GUI layer.
+  - Preserve legacy `errors: list[str]` behavior and completion flow.
+  - Keep this pass limited to additive display and helper-level tests.
+- Hermes coding:
+  - Initial Hermes job ended with timeout code `124`, but file changes were present.
+  - Added `tabs._format_error_details(error_details, max_items=10)`.
+  - `AnalysisTab._on_post_analysis` now logs/appends formatted post-analysis error details when present.
+  - Added helper tests in `tests/test_stage_s.py` for empty input, dict details, mixed legacy strings, and truncation.
+- Codex verification:
+  - `pytest tests/test_stage_s.py -q` -> `7 passed`
+  - `pytest tests/test_stage_s.py tests/test_analysis_runner.py -q` -> `15 passed`
+  - `PYTHONPYCACHEPREFIX=/private/tmp/pycache python3 -m py_compile tabs.py` -> pass
+  - `pytest tests/ -q` -> `423 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.

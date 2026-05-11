@@ -64,6 +64,63 @@ class StatisticalAnalyzer:
         "코호트 구성 단계를 확인하세요."
     )
 
+    # Phase 2 post-index 변수(immortal time bias 위험): baseline 공변량 분석에서 금지
+    _ITB_REASON_CODE = 'ITB_POST_INDEX_COVARIATE'
+    _POST_INDEX_COVARIATES = {
+        'had_insulin_switch',
+        'days_to_switch',
+        'med_switch_date',
+        'insulin_switch_date',
+    }
+    _RC_INSUFFICIENT_DATA = 'INSUFFICIENT_DATA'
+    _RC_INSUFFICIENT_GROUPS = 'INSUFFICIENT_GROUPS'
+    _RC_INVALID_PSM_CALIPER = 'INVALID_PSM_CALIPER'
+    _RC_NO_PSM_MATCHES = 'NO_PSM_MATCHES'
+    _RC_MISSING_REQUIRED_COLUMN = 'MISSING_REQUIRED_COLUMN'
+    _RC_MISSING_UPSTREAM_RESULT = 'MISSING_UPSTREAM_RESULT'
+    _RC_COX_MODEL_FAILED = 'COX_MODEL_FAILED'
+    _RC_PH_VIOLATION = 'PH_VIOLATION'
+    _RC_ALL_COX_MODELS_FAILED = 'ALL_COX_MODELS_FAILED'
+    _RC_ANALYSIS_ERROR = 'ANALYSIS_ERROR'
+    _RC_CROSS_VALIDATION_ERROR = 'CROSS_VALIDATION_ERROR'
+    _RC_SENSITIVITY_ERROR = 'SENSITIVITY_ERROR'
+
+    def _assert_no_post_index_covariates(self, covariates, context):
+        """Baseline 모델 공변량에서 post-index 변수 사용을 차단한다."""
+        forbidden = sorted(set(covariates) & set(self._POST_INDEX_COVARIATES))
+        if forbidden:
+            raise ValueError(
+                f"{self._ITB_REASON_CODE}: context={context}; forbidden_covariates={','.join(forbidden)}"
+            )
+
+    def _skip_result(self, reason_code, reason, *, stage=None, **extra):
+        """명시적 분석 skip 결과의 공통 스키마."""
+        result = {'skipped': True, 'reason_code': reason_code, 'reason': reason}
+        if stage is not None:
+            result['stage'] = stage
+        result.update(extra)
+        return result
+
+    def _model_failure(self, reason_code, reason, *, stage='cox', **extra):
+        """모델별 실패 결과의 공통 스키마."""
+        result = {'reason_code': reason_code, 'reason': reason}
+        if stage is not None:
+            result['stage'] = stage
+        result.update(extra)
+        return result
+
+    def _error_result(self, reason_code, error, *, stage=None, **extra):
+        """예외 기반 분석 실패 결과의 공통 스키마."""
+        result = {
+            'reason_code': reason_code,
+            'reason': str(error),
+            'exception_type': type(error).__name__,
+        }
+        if stage is not None:
+            result['stage'] = stage
+        result.update(extra)
+        return result
+
     def _load_data(self, cb=None):
         """메모리 안전 데이터 로드 — 1회 로드 후 캐시 재사용"""
         if self._cached_df is not None:
@@ -379,7 +436,7 @@ class StatisticalAnalyzer:
 
         T, E = 'follow_up_years', outcome
         results = {}
-        failed_models = {}  # {model_name: error_message}
+        failed_models = {}  # {model_name: {reason_code, reason, stage, ...}}
         exposure = ['is_t1dm', 'is_t2dm_oha', 'is_t2dm_insulin', 'is_t2dm_nomed']
 
         # index_year: NON_DM(first_year 기준)과 DM(진단일 기준) 간 calendar time 차이 보정.
@@ -390,12 +447,14 @@ class StatisticalAnalyzer:
             'model2_socio': exposure + ['age_at_index', 'male', 'index_year', 'income_q',
                              'comor_hypertension', 'comor_dyslipidemia', 'comor_depression'],
             'model3_full': exposure + ['age_at_index', 'male', 'index_year', 'income_q',
-                            'comor_hypertension', 'comor_dyslipidemia', 'comor_depression',
-                            'comp_retinopathy', 'comp_nephropathy', 'comp_neuropathy',
-                            'comor_ischemic_stroke', 'comor_hemorrhagic_stroke',
-                            'comor_ihd', 'comor_atrial_fib', 'comor_heart_failure',
-                            'comp_hypoglycemia'],
+                           'comor_hypertension', 'comor_dyslipidemia', 'comor_depression',
+                           'comp_retinopathy', 'comp_nephropathy', 'comp_neuropathy',
+                           'comor_ischemic_stroke', 'comor_hemorrhagic_stroke',
+                           'comor_ihd', 'comor_atrial_fib', 'comor_heart_failure',
+                           'comp_hypoglycemia'],
         }
+        for mname, mcols in models.items():
+            self._assert_no_post_index_covariates(mcols, context=f"run_cox:{mname}")
 
         # A7: 전체 노출군별 Events/N/Person-years 요약 (모델 공통)
         exposure_group_summary = {}
@@ -483,10 +542,22 @@ class StatisticalAnalyzer:
 
                 # I11: 노출변수 PH 위반 → 해당 모델만 스킵 (다른 모델은 유지)
                 if exposure_ph_violation:
+                    reason = (
+                        "노출변수 PH 가정 위반 — "
+                        f"{', '.join(exposure_ph_violation)}. "
+                        "해당 모델 결과 제외. 층화 Cox 또는 시간-변환 공변량을 검토하세요."
+                    )
                     logger.warning(
                         f"Cox {mname}({outcome}): 노출변수 PH 가정 위반 — "
                         f"{', '.join(exposure_ph_violation)}. "
                         f"해당 모델 결과 제외. 층화 Cox 또는 시간-변환 공변량을 검토하세요."
+                    )
+                    failed_models[mname] = self._model_failure(
+                        self._RC_PH_VIOLATION,
+                        reason,
+                        model=mname,
+                        outcome=outcome,
+                        violated_variables=exposure_ph_violation,
                     )
                     continue
                 results[mname] = result_entry
@@ -494,15 +565,32 @@ class StatisticalAnalyzer:
                 raise  # CoxPHFitter 내부 수렴 실패 등 복구 불가 오류 — 상위 _safe_run이 처리
             except InsufficientDataError as e:
                 logger.warning(f"Cox {mname} 데이터 부족 — 스킵: {e}")
-                failed_models[mname] = f"데이터 부족: {e}"
+                failed_models[mname] = self._model_failure(
+                    self._RC_INSUFFICIENT_DATA,
+                    f"데이터 부족: {e}",
+                    model=mname,
+                    outcome=outcome,
+                )
             except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:
                 logger.exception(f"분석 오류 (Cox {mname})")
                 logger.warning(f"Cox {mname} 실패: {e}")
-                failed_models[mname] = str(e)
+                failed_models[mname] = self._model_failure(
+                    self._RC_COX_MODEL_FAILED,
+                    str(e),
+                    model=mname,
+                    outcome=outcome,
+                    exception_type=type(e).__name__,
+                )
             except Exception as e:
                 logger.exception(f"예기치 않은 오류 (Cox {mname})")
                 logger.warning(f"Cox {mname} 실패: {e}")
-                failed_models[mname] = str(e)
+                failed_models[mname] = self._model_failure(
+                    self._RC_COX_MODEL_FAILED,
+                    str(e),
+                    model=mname,
+                    outcome=outcome,
+                    exception_type=type(e).__name__,
+                )
             finally:
                 del df_model
                 gc.collect()
@@ -511,17 +599,25 @@ class StatisticalAnalyzer:
         model_results = {k: v for k, v in results.items()
                          if not k.startswith('_') and k != 'failed_models'}
         if not model_results:
-            raise RuntimeError(
-                f"Cox 회귀 분석({outcome}) 실패: 모든 모델 피팅에 실패했습니다. "
+            err = RuntimeError(
+                f"{self._RC_ALL_COX_MODELS_FAILED}: Cox 회귀 분석({outcome}) 실패: "
+                f"모든 모델 피팅에 실패했습니다. "
                 f"데이터 크기나 공변량 구성을 확인하세요."
             )
+            err.reason_code = self._RC_ALL_COX_MODELS_FAILED
+            err.failed_models = failed_models
+            raise err
 
         # 부분 실패 요약 로깅
         if failed_models:
+            failure_preview = {
+                k: (v.get('reason', '') if isinstance(v, dict) else str(v))[:80]
+                for k, v in failed_models.items()
+            }
             logger.warning(
                 "Cox(%s) 부분 실패 — 성공 %d개, 실패 %d개: %s",
                 outcome, len(model_results), len(failed_models),
-                {k: v[:80] for k, v in failed_models.items()}
+                failure_preview
             )
             results['failed_models'] = failed_models
 
@@ -560,6 +656,7 @@ class StatisticalAnalyzer:
         # index_year: T1DM vs T2DM의 진단 연도(calendar time) 매칭 — 연도별 DM 유형 분포 차이 보정
         ps_vars = ['age_at_index', 'male', 'index_year', 'income_q', 'comor_hypertension',
                     'comor_dyslipidemia', 'dm_duration_years']
+        self._assert_no_post_index_covariates(ps_vars, context='run_psm')
         ps_vars = [c for c in ps_vars if c in df_dm.columns]
         df_ps = df_dm[ps_vars + ['is_t1dm']].dropna()
 
@@ -568,7 +665,7 @@ class StatisticalAnalyzer:
         except InsufficientDataError as e:
             msg = f"PSM 스킵: {format_error_for_user(e)}"
             if cb: cb(msg)
-            self.results['psm'] = {'skipped': True, 'reason': msg}
+            self.results['psm'] = self._skip_result(self._RC_INSUFFICIENT_DATA, msg, stage='psm')
             return self.results['psm']
 
         # PSM 실행 가능 여부 검증: T1DM과 non-T1DM 모두 존재해야 함
@@ -579,7 +676,7 @@ class StatisticalAnalyzer:
                    f"— 로지스틱 회귀를 위해 각 그룹 최소 2명 이상 필요")
             logger.warning(msg)
             if cb: cb(msg)
-            self.results['psm'] = {'skipped': True, 'reason': msg}
+            self.results['psm'] = self._skip_result(self._RC_INSUFFICIENT_GROUPS, msg, stage='psm')
             return self.results['psm']
 
         lr = get_logistic_regression(max_iter=1000, random_state=42)
@@ -608,7 +705,7 @@ class StatisticalAnalyzer:
                    "(treated/control logit(PS) 분산 부족, 데이터 다양성 확인 필요)")
             logger.warning(msg)
             if cb: cb(msg)
-            self.results['psm'] = {'skipped': True, 'reason': msg}
+            self.results['psm'] = self._skip_result(self._RC_INVALID_PSM_CALIPER, msg, stage='psm')
             return self.results['psm']
         caliper = float(STUDY_SETTINGS.get('PSM_CALIPER', 0.2)) * pooled_sd
 
@@ -616,7 +713,7 @@ class StatisticalAnalyzer:
             msg = f"PSM 스킵: control 수({len(control)})가 0이라 매칭 불가"
             logger.warning(msg)
             if cb: cb(msg)
-            self.results['psm'] = {'skipped': True, 'reason': msg}
+            self.results['psm'] = self._skip_result(self._RC_INSUFFICIENT_GROUPS, msg, stage='psm')
             return self.results['psm']
 
         # ratio보다 많은 후보를 탐색해 used_controls 소진으로 인한 누락 매칭 방지
@@ -647,7 +744,11 @@ class StatisticalAnalyzer:
 
         if not mt_list or not mc_list:
             logger.warning("PSM: caliper 내 매칭 쌍 없음 → PSM 스킵")
-            self.results['psm'] = {'skipped': True, 'reason': 'caliper 내 매칭 쌍 없음'}
+            self.results['psm'] = self._skip_result(
+                self._RC_NO_PSM_MATCHES,
+                'caliper 내 매칭 쌍 없음',
+                stage='psm',
+            )
             if cb: cb("PSM 스킵: caliper 내 매칭 가능한 쌍이 없습니다.")
             return self.results.get('psm', {})
 
@@ -737,7 +838,12 @@ class StatisticalAnalyzer:
         df_dm = df_prepared[df_prepared['exposure_group'] != 'NON_DM']
         if 'dm_duration_cat' not in df_dm.columns:
             if cb: cb("상호작용 분석 스킵: dm_duration_cat 컬럼 없음")
-            self.results['interaction'] = {'skipped': True, 'reason': 'dm_duration_cat 컬럼 없음'}
+            self.results['interaction'] = self._skip_result(
+                self._RC_MISSING_REQUIRED_COLUMN,
+                'dm_duration_cat 컬럼 없음',
+                stage='interaction',
+                missing_column='dm_duration_cat',
+            )
             return None
 
         # ★ 필요 컬럼만 복사
@@ -764,7 +870,15 @@ class StatisticalAnalyzer:
             reason = (f"데이터 부족 ({len(d)}행/{int(d['dementia_event'].sum())}이벤트, "
                       f"최소 {_min_rows}행/{_min_events}이벤트 필요)")
             if cb: cb(f"상호작용 분석 스킵: {reason}")
-            self.results['interaction'] = {'skipped': True, 'reason': reason}
+            self.results['interaction'] = self._skip_result(
+                self._RC_INSUFFICIENT_DATA,
+                reason,
+                stage='interaction',
+                valid_rows=len(d),
+                events=int(d['dementia_event'].sum()),
+                min_rows=_min_rows,
+                min_events=_min_events,
+            )
             return None
 
         try:
@@ -774,9 +888,21 @@ class StatisticalAnalyzer:
         except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:
             logger.exception("분석 오류 (run_interaction)")
             logger.warning(f"상호작용 분석 실패: {e}")
+            self.results['interaction'] = self._skip_result(
+                self._RC_ANALYSIS_ERROR,
+                str(e),
+                stage='interaction',
+                exception_type=type(e).__name__,
+            )
         except Exception as e:
             logger.exception("예기치 않은 오류 (run_interaction)")
             logger.warning(f"상호작용 분석 실패: {e}")
+            self.results['interaction'] = self._skip_result(
+                self._RC_ANALYSIS_ERROR,
+                str(e),
+                stage='interaction',
+                exception_type=type(e).__name__,
+            )
         finally:
             del d; gc.collect()
 
@@ -916,7 +1042,8 @@ class StatisticalAnalyzer:
         # A4: 상호작용 p-value (LRT) 계산 — 하위그룹 변수별
         # 지시 변수가 없는 경우 임시 컬럼을 df 복사본에 추가
         cols_int = model_cols_base + list(_sg_indicators.values())
-        # Phase 2: had_insulin_switch이 있으면 포함 (LRT 계산용)
+        # Phase 2: had_insulin_switch는 post-index 변수이므로 LRT interaction 검정에만 사용한다.
+        # HR 효과 추정용 정적 Cox/PSM 공변량으로 해석하거나 재사용하면 안 된다.
         if 'had_insulin_switch' in df.columns:
             cols_int.append('had_insulin_switch')
         df_int = df[[c for c in cols_int if c in df.columns]].copy()
@@ -1085,10 +1212,13 @@ class StatisticalAnalyzer:
 
         if 'competing_death_event' not in df_prepared.columns:
             logger.warning("competing_death_event 컬럼 없음 — 코호트 재구축 필요")
-            self.results['competing_risks'] = {
-                'implemented': False,
-                'reason': 'competing_death_event 컬럼 없음. 코호트를 재구축하세요.'
-            }
+            self.results['competing_risks'] = self._skip_result(
+                self._RC_MISSING_REQUIRED_COLUMN,
+                'competing_death_event 컬럼 없음. 코호트를 재구축하세요.',
+                stage='competing_risks',
+                implemented=False,
+                missing_column='competing_death_event',
+            )
             return self.results['competing_risks']
 
         T = 'follow_up_years'
@@ -1262,7 +1392,12 @@ class StatisticalAnalyzer:
         cr_results = self.results.get('competing_risks', {})
         if not cr_results:
             logger.warning("교차 검증 스킵: run_competing_risks() 결과 없음")
-            self.results['cross_validation'] = {'skipped': True, 'reason': '경쟁위험 분석 결과 없음'}
+            self.results['cross_validation'] = self._skip_result(
+                self._RC_MISSING_UPSTREAM_RESULT,
+                '경쟁위험 분석 결과 없음',
+                stage='cross_validation',
+                upstream='competing_risks',
+            )
             return self.results['cross_validation']
 
         if df_prepared is None:
@@ -1316,6 +1451,12 @@ class StatisticalAnalyzer:
             except Exception as e:
                 logger.exception("교차 검증 오류 (%s): %s", outcome, e)
                 status = 'ERROR'
+                error_info = self._error_result(
+                    self._RC_CROSS_VALIDATION_ERROR,
+                    e,
+                    stage='cross_validation',
+                    outcome=outcome,
+                )
                 if cb: cb(f"[오류] 교차 검증 {outcome}: {e}")
 
             cv_results[outcome] = {
@@ -1327,6 +1468,8 @@ class StatisticalAnalyzer:
                 'validation_status': status,
                 'temp_dir':          str(temp_dir) if temp_dir else None,
             }
+            if status == 'ERROR':
+                cv_results[outcome].update(error_info)
 
         self.results['cross_validation'] = cv_results
         if cb: cb("교차 검증 완료!")
@@ -1358,11 +1501,19 @@ class StatisticalAnalyzer:
             del r
         except (duckdb.Error, pd.errors.EmptyDataError, ValueError, MemoryError) as e:
             logger.warning("민감도(항치매약) 쿼리 실패: %s", e)
-            sens['dementia_with_drug'] = {'n': None, 'desc': f'쿼리 실패: {e}'}
+            sens['dementia_with_drug'] = {
+                'n': None,
+                'desc': f'쿼리 실패: {e}',
+                **self._error_result(self._RC_SENSITIVITY_ERROR, e, stage='sensitivity'),
+            }
             if cb: cb(f"[경고] 민감도(항치매약) 쿼리 실패: {e}")
         except Exception as e:
             logger.exception("예기치 않은 오류 (민감도-항치매약)")
-            sens['dementia_with_drug'] = {'n': None, 'desc': f'오류: {e}'}
+            sens['dementia_with_drug'] = {
+                'n': None,
+                'desc': f'오류: {e}',
+                **self._error_result(self._RC_SENSITIVITY_ERROR, e, stage='sensitivity'),
+            }
             if cb: cb(f"[오류] 민감도(항치매약): {e}")
 
         sens['fine_gray'] = {
@@ -1393,6 +1544,7 @@ class StatisticalAnalyzer:
                 exp_cols_cut = [c for c in ['is_t1dm', 'is_t2dm_oha', 'is_t2dm_insulin', 'is_t2dm_nomed']
                                 if c in df_cut.columns]
                 cox_results = {}
+                failed_models = {}
                 if n_events >= int(STUDY_SETTINGS.get('MIN_EVENTS', 10)):
                     for exp_var in exp_cols_cut:
                         cols_m = [exp_var, 'age_at_index', 'male', 'follow_up_years', 'dementia_event']
@@ -1412,16 +1564,31 @@ class StatisticalAnalyzer:
                                     }
                             except Exception as e2:
                                 logger.debug("민감도 cutoff %dy Cox (%s) 실패: %s", cutoff_yr, exp_var, e2)
+                                failed_models[exp_var] = self._model_failure(
+                                    self._RC_COX_MODEL_FAILED,
+                                    str(e2),
+                                    stage='sensitivity_cutoff_cox',
+                                    model=exp_var,
+                                    cutoff_year=cutoff_yr,
+                                    exception_type=type(e2).__name__,
+                                )
                 sens[key] = {
                     'n': len(df_cut), 'n_events': n_events,
                     'desc': f'추적기간 {cutoff_yr}년 절단 민감도 분석',
                     'cox_results': cox_results,
+                    'failed_models': failed_models,
                 }
                 del df_cut
                 gc.collect()
             except Exception as e:
                 logger.warning("민감도(추적기간 절단 %dy): %s", cutoff_yr, e)
-                sens[key] = {'n': None, 'desc': f'추적기간 {cutoff_yr}년 절단', 'error': str(e)}
+                logger.debug("Hermes R2-3a: follow-up cutoff exception structured at %dy", cutoff_yr)
+                sens[key] = {
+                    'n': None,
+                    'desc': f'추적기간 {cutoff_yr}년 절단',
+                    'error': str(e),
+                    **self._error_result(self._RC_SENSITIVITY_ERROR, e, stage='sensitivity'),
+                }
 
         # A6-2: DM 정의 변형 (외래 방문 ≥2회) — 실제 데이터에서만 의미 있음
         # 코호트 빌더가 이미 필터링하므로 여기서는 메타데이터만 기록
@@ -1628,6 +1795,7 @@ class StatisticalAnalyzer:
             if cb: cb("GPU 가속 모드로 분석을 실행합니다.")
 
         step_errors = {}  # {step_name: error_message}
+        step_error_details = {}  # {step_name: structured_error}
 
         # B1: 진행률(%) 계산 — 활성 단계 수 기준
         _active_steps = (['table1'] +
@@ -1657,10 +1825,22 @@ class StatisticalAnalyzer:
                     checkpoint.mark_done(step_name, self.results.get(step_name))
             except (InsufficientDataError, RuntimeError) as e:
                 step_errors[step_name] = str(e)
+                reason_code = getattr(e, 'reason_code', None) or 'STEP_SKIPPED'
+                step_error_details[step_name] = self._error_result(
+                    reason_code,
+                    e,
+                    stage=step_name,
+                )
                 logger.warning("분석 단계 스킵 (%s): %s", step_name, e)
                 if cb: cb(f"[경고] {step_name} 스킵: {e}")
             except Exception as e:
                 step_errors[step_name] = str(e)
+                reason_code = getattr(e, 'reason_code', None) or 'STEP_ERROR'
+                step_error_details[step_name] = self._error_result(
+                    reason_code,
+                    e,
+                    stage=step_name,
+                )
                 logger.exception("분석 단계 오류 (%s)", step_name)
                 if cb: cb(f"[오류] {step_name}: {e}")
             finally:
@@ -1699,6 +1879,7 @@ class StatisticalAnalyzer:
 
         if step_errors:
             self.results['step_errors'] = step_errors
+            self.results['step_error_details'] = step_error_details
             logger.warning("분석 단계 오류 요약: %s", step_errors)
 
         self.results['sampling_info'] = info

@@ -30,6 +30,80 @@ from utils import format_number, CohortStepError, format_error_for_user
 logger = logging.getLogger(__name__)
 
 
+def _format_cox_failed_model_reason(failure):
+    """Cox failed_models의 legacy 문자열/structured dict를 표시 문자열로 변환."""
+    if isinstance(failure, dict):
+        return str(failure.get('reason') or failure.get('reason_code') or failure)
+    return str(failure)
+
+
+def _format_error_details(error_details, max_items=10) -> str:
+    """error_details(None/list[dict|str|mixed])를 사용자 표시 문자열로 변환."""
+    if not error_details:
+        return ""
+
+    if isinstance(error_details, (str, dict)):
+        items = [error_details]
+    else:
+        try:
+            items = list(error_details)
+        except TypeError:
+            items = [error_details]
+
+    if not items:
+        return ""
+
+    lines = []
+    for item in items[:max_items]:
+        if isinstance(item, dict):
+            reason_code = item.get('reason_code')
+            stage = item.get('stage')
+            reason = item.get('reason') or item.get('error')
+            parts = [str(v) for v in (reason_code, stage, reason) if v not in (None, "")]
+            text = " | ".join(parts) if parts else str(item)
+        else:
+            text = str(item)
+        lines.append(f"  • {text}")
+
+    remaining = len(items) - min(len(items), max_items)
+    if remaining > 0:
+        lines.append(f"  • ... 외 {remaining}건")
+
+    return "\n".join(lines)
+
+
+def _build_step_failure_message(step_errors, step_error_details):
+    """step_errors/step_error_details를 GUI 경고 본문+상세로 빌드.
+
+    Returns:
+        tuple[list[str], list[str]] | None
+    """
+    step_errors = step_errors if isinstance(step_errors, dict) else {}
+    step_error_details = step_error_details if isinstance(step_error_details, dict) else {}
+
+    body_lines = [f"  • {step}: {str(msg)[:100]}" for step, msg in step_errors.items()]
+    detail_lines = []
+
+    for step, detail in step_error_details.items():
+        if isinstance(detail, dict):
+            reason_code = detail.get('reason_code')
+            stage = detail.get('stage')
+            reason = detail.get('reason') or detail.get('error')
+            parts = [str(v) for v in (step, reason_code, stage, reason) if v not in (None, "")]
+            if parts:
+                detail_lines.append(f"  • {' | '.join(parts)}")
+        elif detail not in (None, ""):
+            detail_lines.append(f"  • {step} | {detail}")
+
+    if not body_lines and detail_lines:
+        body_lines = ['  • 상세 오류는 아래 "자세히"를 확인하세요.']
+
+    if not body_lines and not detail_lines:
+        return None
+
+    return body_lines, detail_lines
+
+
 class AppContext:
     """Shared state between tabs and MainWindow."""
     def __init__(self):
@@ -1303,16 +1377,30 @@ class AnalysisTab(QWidget):
         for err in result.get('errors', []):
             self.log_signal.emit(err)
 
+        formatted_error_details = _format_error_details(result.get('error_details', []))
+        if formatted_error_details:
+            self.log_signal.emit("후처리 오류 상세:\n" + formatted_error_details)
+            self.analysis_text.append("후처리 오류 상세:\n" + formatted_error_details)
+
         ar = self.ctx.all_results.get('analysis', {})
 
         # 분석 단계 오류 (step_errors) 표시
         step_errors = ar.get('step_errors', {})
-        if step_errors:
-            lines = [f"  • {k}: {v[:100]}" for k, v in step_errors.items()]
+        step_error_details = ar.get('step_error_details', {})
+        step_failure_message = _build_step_failure_message(step_errors, step_error_details)
+        if step_failure_message:
+            body_lines, detail_lines = step_failure_message
             from PyQt5.QtWidgets import QMessageBox
-            QMessageBox.warning(self, "일부 분석 단계 실패",
+            msg = QMessageBox(self)
+            msg.setIcon(QMessageBox.Warning)
+            msg.setWindowTitle("일부 분석 단계 실패")
+            msg.setText(
                 "일부 분석이 실패했습니다 (나머지 결과는 정상):\n" +
-                "\n".join(lines))
+                "\n".join(body_lines)
+            )
+            if detail_lines:
+                msg.setDetailedText("\n".join(detail_lines))
+            msg.exec_()
 
         # Cox 모델별 부분 실패 집계 → 경고 메시지
         cox_warnings = []
@@ -1320,7 +1408,8 @@ class AnalysisTab(QWidget):
             if key.startswith('cox_') and isinstance(val, dict) and 'failed_models' in val:
                 outcome = key[4:]
                 for mname, reason in val['failed_models'].items():
-                    cox_warnings.append(f"  • {outcome}/{mname}: {reason[:80]}")
+                    reason_text = _format_cox_failed_model_reason(reason)
+                    cox_warnings.append(f"  • {outcome}/{mname}: {reason_text[:80]}")
         if cox_warnings:
             from PyQt5.QtWidgets import QMessageBox
             QMessageBox.warning(self, "Cox 분석 부분 실패",

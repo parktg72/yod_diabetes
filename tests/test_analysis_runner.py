@@ -32,7 +32,7 @@ class TestRunPostAnalysisErrors:
     """오류 격리: 개별 시각화 실패가 전체 실행을 중단하지 않는다."""
 
     def test_km_error_is_collected_not_raised(self, tmp_path):
-        """KM 쿼리 실패 시 errors 목록에 수집되고 나머지 단계 계속 진행."""
+        """KM 쿼리 실패 시 errors/error_details에 수집되고 나머지 단계 계속 진행."""
         dm = MagicMock()
         dm.query.side_effect = RuntimeError("DuckDB 쿼리 실패")
 
@@ -41,6 +41,7 @@ class TestRunPostAnalysisErrors:
         assert len(result['errors']) >= 1
         assert any('KM' in e for e in result['errors']), \
             f"KM 오류가 errors에 포함돼야 함: {result['errors']}"
+        assert result['error_details'][0]['reason_code'] == 'VIZ_KM_ERROR'
 
     def test_forest_error_is_collected_not_raised(self, tmp_path):
         """Forest plot 실패 시 errors 목록에 수집."""
@@ -90,6 +91,37 @@ class TestRunPostAnalysisErrors:
         assert any('내보내기' in e for e in result['errors']), \
             f"내보내기 오류가 errors에 포함돼야 함: {result['errors']}"
 
+    def test_error_detail_reason_code_mappings(self, tmp_path):
+        """후처리 6개 broad except 경로의 reason_code 매핑 검증."""
+        dm = _make_dm()
+        analysis_results = {
+            'subgroup': {'ok': 1},
+            'psm': {'balance': {'a': 1}, 'balance_before': {'a': 1}},
+            'competing_risks': {'dementia': {'cif_by_group': {'g1': {'times': [1], 'cif': [0.1]}}}},
+        }
+
+        with patch('analysis_runner.Visualizer') as MockViz, \
+             patch('analysis_runner.ResultsExporter') as MockExp:
+            instance = MockViz.return_value
+            instance.plot_km.side_effect = RuntimeError('km fail')
+            instance.plot_forest.side_effect = RuntimeError('forest fail')
+            instance.plot_psm_balance.side_effect = RuntimeError('psm fail')
+            instance.plot_love.side_effect = RuntimeError('love fail')
+            instance.plot_cif.side_effect = RuntimeError('cif fail')
+            MockExp.return_value.export_all.side_effect = RuntimeError('export fail')
+
+            result = run_post_analysis(dm, analysis_results, tmp_path)
+
+        reason_codes = {d['reason_code'] for d in result['error_details']}
+        assert reason_codes == {
+            'VIZ_KM_ERROR',
+            'VIZ_FOREST_ERROR',
+            'VIZ_PSM_BALANCE_ERROR',
+            'VIZ_LOVE_ERROR',
+            'VIZ_CIF_ERROR',
+            'EXPORT_ERROR',
+        }
+
 
 class TestRunPostAnalysisReturnShape:
     """반환값 구조 검증."""
@@ -106,9 +138,12 @@ class TestRunPostAnalysisReturnShape:
             result = run_post_analysis(dm, {}, tmp_path)
 
         assert 'errors' in result
+        assert 'error_details' in result
         assert 'exported_files' in result
         assert isinstance(result['errors'], list)
+        assert isinstance(result['error_details'], list)
         assert isinstance(result['exported_files'], list)
+        assert result['error_details'] == []
 
     def test_exported_files_from_exporter(self, tmp_path):
         """exporter.export_all 반환값이 exported_files에 포함된다."""

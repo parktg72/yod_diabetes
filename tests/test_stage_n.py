@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import numpy as np
+import pytest
 from unittest.mock import patch, MagicMock
 from statistical_analysis import StatisticalAnalyzer, SamplingInfo
 
@@ -96,8 +97,20 @@ def test_run_cox_raises_when_all_models_fail():
                 'PH_ALPHA': 0.05}):
         with patch('statistical_analysis.CoxPHFitter') as mock_cox_cls:
             mock_cox_cls.return_value.fit.side_effect = ValueError("강제 실패")
-            with _pytest.raises(RuntimeError, match="Cox 회귀 분석"):
+            with _pytest.raises(RuntimeError, match="ALL_COX_MODELS_FAILED") as exc_info:
                 analyzer.run_cox(df_prepared=df)
+
+    exc = exc_info.value
+    assert getattr(exc, 'reason_code', None) == 'ALL_COX_MODELS_FAILED'
+    assert set(getattr(exc, 'failed_models', {}).keys()) == {
+        'model1_age_sex',
+        'model2_socio',
+        'model3_full',
+    }
+    assert {
+        failure.get('reason_code')
+        for failure in exc.failed_models.values()
+    } == {'COX_MODEL_FAILED'}
 
 
 def test_psm_caliper_respects_study_settings():
@@ -178,8 +191,36 @@ def test_run_cox_skips_model_when_exposure_ph_violated(caplog):
     assert 'model1_age_sex' not in result, "PH 위반 모델은 결과에서 제외"
     assert 'model2_socio' in result, "정상 모델은 결과에 포함"
     assert 'model3_full' in result, "정상 모델은 결과에 포함"
+    assert result['failed_models']['model1_age_sex']['reason_code'] == 'PH_VIOLATION'
+    assert result['failed_models']['model1_age_sex']['violated_variables'] == ['is_t1dm']
     assert any('PH 가정 위반' in r.message for r in caplog.records), \
         "PH 위반 경고 로그 필요"
+
+
+def test_run_cox_all_models_succeed_has_no_failed_models_key():
+    """R2-2 회귀: 모든 Cox 모델 성공 시 failed_models 키를 만들지 않는다."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+
+    ph_mock = MagicMock()
+    ph_mock.summary = pd.DataFrame({'p': [0.9]}, index=['is_t1dm'])
+
+    with patch('statistical_analysis.STUDY_SETTINGS',
+               {'MIN_VALID_ROWS': 10, 'MIN_EVENTS': 5, 'SAMPLING_SEED': 42,
+                'PH_ALPHA': 0.05}):
+        with patch('statistical_analysis.CoxPHFitter') as mock_cls, \
+             patch('statistical_analysis.proportional_hazard_test',
+                   return_value=ph_mock):
+            mock_cls.return_value.fit.return_value = None
+            mock_cls.return_value.summary = pd.DataFrame()
+            mock_cls.return_value.concordance_index_ = 0.6
+
+            result = analyzer.run_cox(df_prepared=df)
+
+    assert 'model1_age_sex' in result
+    assert 'model2_socio' in result
+    assert 'model3_full' in result
+    assert 'failed_models' not in result
 
 
 def test_sampling_seed_out_of_range_raises():
@@ -254,7 +295,29 @@ def test_run_psm_pooled_sd_zero_returns_skipped_dict():
     assert result is not None, "run_psm 이 None 대신 skipped dict를 반환해야 한다"
     assert result.get('skipped') is True, f"skipped=True 기대, 실제: {result}"
     assert 'reason' in result, "reason 키 필요"
+    assert result.get('reason_code') == 'INVALID_PSM_CALIPER'
+    assert result.get('stage') == 'psm'
     assert analyzer.results.get('psm') == result, "self.results['psm']에 저장되어야 한다"
+
+
+def test_skip_result_helper_adds_reason_code_stage_and_extra():
+    """R2-1: skip dict 공통 스키마는 skipped/reason_code/reason/stage/extra를 보존한다."""
+    analyzer = StatisticalAnalyzer(data_manager=None)
+
+    result = analyzer._skip_result(
+        'INSUFFICIENT_DATA',
+        '데이터 부족',
+        stage='unit',
+        valid_rows=3,
+    )
+
+    assert result == {
+        'skipped': True,
+        'reason_code': 'INSUFFICIENT_DATA',
+        'reason': '데이터 부족',
+        'stage': 'unit',
+        'valid_rows': 3,
+    }
 
 
 def test_run_interaction_saves_skipped_dict_when_no_duration_col():
@@ -279,6 +342,8 @@ def test_run_interaction_saves_skipped_dict_when_no_duration_col():
     assert stored is not None, "self.results['interaction']에 skipped dict 저장 필요"
     assert stored.get('skipped') is True
     assert 'reason' in stored
+    assert stored.get('reason_code') == 'MISSING_REQUIRED_COLUMN'
+    assert stored.get('stage') == 'interaction'
 
 
 def test_run_interaction_saves_skipped_dict_when_insufficient_data():
@@ -305,6 +370,151 @@ def test_run_interaction_saves_skipped_dict_when_insufficient_data():
     assert stored is not None, "self.results['interaction']에 skipped dict 저장 필요"
     assert stored.get('skipped') is True
     assert 'reason' in stored
+    assert stored.get('reason_code') == 'INSUFFICIENT_DATA'
+    assert stored.get('stage') == 'interaction'
+
+
+def test_run_interaction_fit_failure_saves_analysis_error_reason_code():
+    """R2-3a: interaction Cox 실패는 reason_code/exception_type을 남긴다."""
+    n = 40
+    df = pd.DataFrame({
+        'exposure_group': ['T1DM'] * 20 + ['T2DM_OHA'] * 20,
+        'is_t1dm': [1] * 20 + [0] * 20,
+        'dm_duration_cat': ['5-10yr'] * 20 + ['>=10yr'] * 20,
+        'age_at_index': [50.0] * n,
+        'male': [1] * n,
+        'income_q': [5] * n,
+        'cci_score': [0] * n,
+        'follow_up_years': [1.0] * n,
+        'dementia_event': [1] * 10 + [0] * 30,
+    })
+    analyzer = _make_analyzer(df)
+
+    with patch('statistical_analysis.STUDY_SETTINGS',
+               {'MIN_VALID_ROWS': 10, 'MIN_EVENTS': 5, 'SAMPLING_SEED': 42}):
+        with patch('statistical_analysis.CoxPHFitter') as mock_cls:
+            mock_cls.return_value.fit.side_effect = RuntimeError("interaction fit failed")
+            result = analyzer.run_interaction(df_prepared=df)
+
+    assert result.get('skipped') is True
+    assert result.get('reason_code') == 'ANALYSIS_ERROR'
+    assert result.get('stage') == 'interaction'
+    assert result.get('exception_type') == 'RuntimeError'
+    assert 'interaction fit failed' in result.get('reason', '')
+
+
+def test_run_competing_risks_missing_column_has_reason_code():
+    """R2-1: competing_death_event 누락 skip dict에 reason_code/stage가 포함된다."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+
+    with patch('gpu_accelerator.is_gpu_enabled', return_value=False):
+        result = analyzer.run_competing_risks(df_prepared=df)
+
+    assert result.get('implemented') is False
+    assert 'reason' in result
+    assert result.get('reason_code') == 'MISSING_REQUIRED_COLUMN'
+    assert result.get('stage') == 'competing_risks'
+
+
+def test_run_cross_validation_missing_upstream_has_reason_code():
+    """R2-1: competing_risks 선행 결과가 없으면 reason_code/stage를 저장한다."""
+    analyzer = _make_analyzer(pd.DataFrame())
+
+    result = analyzer.run_cross_validation(df_prepared=pd.DataFrame())
+
+    assert result.get('skipped') is True
+    assert 'reason' in result
+    assert result.get('reason_code') == 'MISSING_UPSTREAM_RESULT'
+    assert result.get('stage') == 'cross_validation'
+
+
+def test_run_cross_validation_exception_has_reason_code():
+    """R2-3a: cross-validation 내부 예외는 outcome 결과에 reason_code를 남긴다."""
+    n = 35
+    df = pd.DataFrame({
+        'follow_up_years': [1.0] * n,
+        'dementia_event': [1] * 6 + [0] * (n - 6),
+        'competing_death_event': [0] * n,
+        'is_t1dm': [1] * 18 + [0] * 17,
+        'is_t2dm_oha': [0] * 18 + [1] * 17,
+        'is_t2dm_insulin': [0] * n,
+        'is_t2dm_nomed': [0] * n,
+        'age_at_index': [55.0] * n,
+        'male': [1] * n,
+    })
+    analyzer = _make_analyzer(df)
+    analyzer.results['competing_risks'] = {
+        'dementia_event': {'fine_gray_summary': pd.DataFrame()}
+    }
+
+    with patch('cross_validator.CrossValidator.export_csv_for_r',
+               side_effect=RuntimeError("csv export failed")):
+        result = analyzer.run_cross_validation(df_prepared=df)
+
+    entry = result['dementia_event']
+    assert entry['validation_status'] == 'ERROR'
+    assert entry['reason_code'] == 'CROSS_VALIDATION_ERROR'
+    assert entry['stage'] == 'cross_validation'
+    assert entry['exception_type'] == 'RuntimeError'
+    assert 'csv export failed' in entry['reason']
+
+
+def test_run_sensitivity_unexpected_drug_query_error_has_reason_code():
+    """R2-3a: sensitivity broad exception 결과에 reason_code를 남긴다."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+    analyzer.dm = MagicMock()
+    analyzer.dm.query.side_effect = RuntimeError("drug query failed")
+
+    with patch('statistical_analysis.CoxPHFitter') as mock_cls:
+        mock_cls.return_value.fit.return_value = None
+        mock_cls.return_value.summary = pd.DataFrame()
+        result = analyzer.run_sensitivity(df_prepared=df)
+
+    entry = result['dementia_with_drug']
+    assert entry['reason_code'] == 'SENSITIVITY_ERROR'
+    assert entry['stage'] == 'sensitivity'
+    assert entry['exception_type'] == 'RuntimeError'
+    assert 'drug query failed' in entry['reason']
+
+
+def test_run_sensitivity_followup_cutoff_outer_exception_has_reason_code():
+    """R2-3a: follow-up cutoff outer 예외 경로도 구조화된 실패 정보를 남긴다."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+    analyzer.dm = MagicMock()
+    analyzer.dm.query.return_value = pd.DataFrame({'n': [0]})
+
+    with patch('pandas.DataFrame.copy', side_effect=RuntimeError("copy failed")):
+        result = analyzer.run_sensitivity(df_prepared=df)
+
+    entry = result['followup_cutoff_1y']
+    assert entry['error'] == 'copy failed'
+    assert entry['reason_code'] == 'SENSITIVITY_ERROR'
+    assert entry['stage'] == 'sensitivity'
+    assert entry['exception_type'] == 'RuntimeError'
+    assert 'copy failed' in entry['reason']
+
+
+def test_run_sensitivity_cutoff_cox_failure_is_recorded_in_failed_models():
+    """R2-3a: cutoff Cox 개별 노출 실패가 failed_models에 남는다."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+    analyzer.dm = MagicMock()
+    analyzer.dm.query.return_value = pd.DataFrame({'n': [0]})
+
+    with patch('statistical_analysis.CoxPHFitter') as mock_cls:
+        mock_cls.return_value.fit.side_effect = RuntimeError('cox fit failed')
+        result = analyzer.run_sensitivity(df_prepared=df)
+
+    cutoff_entry = result['followup_cutoff_1y']
+    assert 'is_t1dm' in cutoff_entry['failed_models']
+    failure = cutoff_entry['failed_models']['is_t1dm']
+    assert failure['reason_code'] == 'COX_MODEL_FAILED'
+    assert failure['stage'] == 'sensitivity_cutoff_cox'
+    assert failure['exception_type'] == 'RuntimeError'
+    assert 'cox fit failed' in failure['reason']
 
 
 def test_load_settings_raises_on_invalid_sampling_seed(tmp_path):
@@ -334,3 +544,66 @@ def test_load_settings_accepts_valid_sampling_seed(tmp_path):
     result = load_settings(path=str(settings_file))
     assert result is True
     assert STUDY_SETTINGS['SAMPLING_SEED'] == 50
+
+
+def test_run_psm_raises_on_post_index_covariate_guard_via_monkeypatch():
+    """A: run_psm은 post-index 공변량 guard 위반 시 reason_code 포함 ValueError를 발생해야 한다."""
+    n = 20
+    df = pd.DataFrame({
+        'exposure_group': ['T1DM'] * 10 + ['T2DM_OHA'] * 10,
+        'is_t1dm': [1] * 10 + [0] * 10,
+        'is_t2dm_oha': [0] * 10 + [1] * 10,
+        'is_t2dm_insulin': [0] * n,
+        'is_t2dm_nomed': [0] * n,
+        'age_at_index': [60.0] * n,
+        'male': [1] * n,
+        'index_year': [2015] * n,
+        'income_q': [3.0] * n,
+        'comor_hypertension': [0] * n,
+        'comor_dyslipidemia': [0] * n,
+        'dm_duration_years': [5.0] * n,
+        'follow_up_years': [1.0] * n,
+        'dementia_event': [0] * n,
+        'ad_event': [0] * n,
+        'vad_event': [0] * n,
+    })
+    analyzer = _make_analyzer(df)
+
+    with patch.object(StatisticalAnalyzer, '_POST_INDEX_COVARIATES', {'age_at_index'}):
+        with pytest.raises(ValueError, match='ITB_POST_INDEX_COVARIATE'):
+            analyzer.run_psm(df_prepared=df)
+
+
+def test_post_index_covariate_guard_allows_baseline_insulin_flag():
+    """A: baseline_has_insulin은 기저선 변수이므로 ITB guard 대상이 아니다."""
+    analyzer = StatisticalAnalyzer(data_manager=None)
+
+    analyzer._assert_no_post_index_covariates(
+        ['baseline_has_insulin', 'age_at_index', 'male'],
+        context='unit',
+    )
+
+
+def test_post_index_covariate_guard_reports_actual_phase2_variables():
+    """A: 실제 Phase 2 post-index 변수는 reason_code와 함께 차단된다."""
+    analyzer = StatisticalAnalyzer(data_manager=None)
+
+    with pytest.raises(ValueError, match='ITB_POST_INDEX_COVARIATE') as exc_info:
+        analyzer._assert_no_post_index_covariates(
+            ['age_at_index', 'had_insulin_switch', 'days_to_switch'],
+            context='unit',
+        )
+
+    msg = str(exc_info.value)
+    assert 'context=unit' in msg
+    assert 'forbidden_covariates=days_to_switch,had_insulin_switch' in msg
+
+
+def test_run_cox_raises_on_post_index_covariate_guard_via_monkeypatch():
+    """A: run_cox는 post-index 공변량 guard 위반 시 reason_code 포함 ValueError를 발생해야 한다."""
+    df = _make_cox_df()
+    analyzer = _make_analyzer(df)
+
+    with patch.object(StatisticalAnalyzer, '_POST_INDEX_COVARIATES', {'age_at_index'}):
+        with pytest.raises(ValueError, match='ITB_POST_INDEX_COVARIATE'):
+            analyzer.run_cox(df_prepared=df)

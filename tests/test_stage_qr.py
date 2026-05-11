@@ -138,6 +138,17 @@ def test_run_cox_emits_per_model_progress():
         f"모델별 진행 메시지 3개 미만. 실제: {messages}"
 
 
+def test_tabs_formats_structured_cox_failed_model_reason():
+    """R2-2: tabs.py는 failed_models 값이 dict여도 경고 문자열을 만들 수 있어야 한다."""
+    tabs = pytest.importorskip("tabs")
+
+    assert tabs._format_cox_failed_model_reason({
+        'reason_code': 'INSUFFICIENT_DATA',
+        'reason': '데이터 부족: 5행',
+    }) == '데이터 부족: 5행'
+    assert tabs._format_cox_failed_model_reason('legacy reason') == 'legacy reason'
+
+
 def test_run_competing_risks_emits_per_outcome_progress():
     """run_competing_risks 가 각 outcome 시작 시 메시지를 emit 해야 한다."""
     dm = MagicMock()

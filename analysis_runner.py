@@ -11,6 +11,19 @@ from results_exporter import ResultsExporter
 logger = logging.getLogger(__name__)
 
 
+def make_error_result(reason_code, error, *, stage=None, **extra):
+    """예외 기반 후처리 실패 결과의 공통 스키마."""
+    result = {
+        'reason_code': reason_code,
+        'reason': str(error),
+        'exception_type': type(error).__name__,
+    }
+    if stage is not None:
+        result['stage'] = stage
+    result.update(extra)
+    return result
+
+
 def run_post_analysis(dm, analysis_results, results_dir, log=None):
     """분석 결과 시각화 + 내보내기 (GUI 비의존)
 
@@ -21,12 +34,13 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
         log: 로그 콜백 함수 (없으면 logger.info 사용)
 
     Returns:
-        dict: {'errors': list[str], 'exported_files': list[str]}
+        dict: {'errors': list[str], 'error_details': list[dict], 'exported_files': list[str]}
     """
     if log is None:
         log = logger.info
 
     errors = []
+    error_details = []
     viz = Visualizer(str(results_dir))
     sampling_info = analysis_results.get('sampling_info')
 
@@ -53,6 +67,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
         gc.collect()
     except Exception as e:
         errors.append(f"KM 오류: {e}")
+        error_details.append(make_error_result('VIZ_KM_ERROR', e, stage='post_analysis_km'))
         log(f"KM 오류: {e}")
 
     # Forest Plot
@@ -61,6 +76,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
             viz.plot_forest(analysis_results['subgroup'])
         except Exception as e:
             errors.append(f"Forest plot 오류: {e}")
+            error_details.append(make_error_result('VIZ_FOREST_ERROR', e, stage='post_analysis_forest'))
             log(f"Forest plot 오류: {e}")
 
     # PSM Balance (After)
@@ -69,6 +85,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
             viz.plot_psm_balance(analysis_results['psm'].get('balance', {}))
         except Exception as e:
             errors.append(f"PSM balance plot 오류: {e}")
+            error_details.append(make_error_result('VIZ_PSM_BALANCE_ERROR', e, stage='post_analysis_psm_balance'))
             log(f"PSM balance plot 오류: {e}")
 
     # A2: Love Plot (Before vs After PSM)
@@ -80,6 +97,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
                 viz.plot_love(b_before, b_after, filename='love_plot.png')
         except Exception as e:
             errors.append(f"Love plot 오류: {e}")
+            error_details.append(make_error_result('VIZ_LOVE_ERROR', e, stage='post_analysis_love'))
             log(f"Love plot 오류: {e}")
 
     # CIF
@@ -91,6 +109,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
                                  title=f'CIF: {oc}', filename=f'cif_{oc}.png')
         except Exception as e:
             errors.append(f"CIF plot 오류: {e}")
+            error_details.append(make_error_result('VIZ_CIF_ERROR', e, stage='post_analysis_cif'))
             log(f"CIF plot 오류: {e}")
 
     # Export
@@ -100,6 +119,7 @@ def run_post_analysis(dm, analysis_results, results_dir, log=None):
         exported_files = exporter.export_all(analysis_results, sampling_info=sampling_info)
     except Exception as e:
         errors.append(f"결과 내보내기 오류: {e}")
+        error_details.append(make_error_result('EXPORT_ERROR', e, stage='post_analysis_export'))
         log(f"결과 내보내기 오류: {e}")
 
-    return {'errors': errors, 'exported_files': exported_files}
+    return {'errors': errors, 'error_details': error_details, 'exported_files': exported_files}

@@ -107,3 +107,26 @@ class TestSafeRunPartialFailure:
         # Cox는 outcome 3개 → 각각 기록
         assert any('cox_' in k for k in errs), f"Cox 오류 기록 기대: {errs}"
         assert 'psm' in errs, f"PSM 오류 기록 기대: {errs}"
+
+    def test_step_error_details_keeps_legacy_step_errors(self, tmp_path):
+        """R2-3a: step_errors(문자열 dict)는 유지하고 구조화 상세를 별도 저장한다."""
+        analyzer, df = _make_analyzer(tmp_path)
+        noop = MagicMock(return_value=None)
+
+        with patch.object(analyzer, '_load_data', return_value=(df, MagicMock(applied=False, label=''))), \
+             patch.object(analyzer, '_prepare', return_value=df), \
+             patch.object(analyzer, 'generate_table1', noop), \
+             patch.object(analyzer, 'run_cox', noop), \
+             patch.object(analyzer, 'run_psm', side_effect=RuntimeError("PSM 실패")), \
+             patch.object(analyzer, 'run_interaction', noop), \
+             patch.object(analyzer, 'run_subgroup', noop), \
+             patch.object(analyzer, 'run_competing_risks', noop), \
+             patch.object(analyzer, 'run_sensitivity', noop), \
+             patch('statistical_analysis.mem_manager'):
+            results = analyzer.run_selected(run_cox=False, run_psm=True)
+
+        assert results['step_errors']['psm'] == 'PSM 실패'
+        detail = results['step_error_details']['psm']
+        assert detail['reason_code'] == 'STEP_SKIPPED'
+        assert detail['stage'] == 'psm'
+        assert detail['exception_type'] == 'RuntimeError'
