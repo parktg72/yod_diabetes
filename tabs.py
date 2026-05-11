@@ -955,6 +955,7 @@ class DataLoadTab(QWidget):
                     if progress_callback:
                         progress_callback(f"{tn} 완료: {cnt:,}행")
                 except Exception as e:
+                    # 개별 테이블 실패는 수집하고 다음 테이블 로드를 계속한다.
                     errors[tn] = str(e)
                     logger.exception(f"테이블 로드 실패: {tn}")
                     if progress_callback:
@@ -1245,7 +1246,7 @@ class AnalysisTab(QWidget):
         try:
             total = self.ctx.dm.storage.get_row_count('final_analysis')
         except Exception as e:
-            logger.warning("final_analysis 행 수 조회 실패: %s", e)
+            logger.warning("final_analysis 행 수 조회 실패", exc_info=True)
             QMessageBox.warning(self, "안내",
                 f"분석 대상 테이블 조회 중 오류가 발생했습니다:\n{e}\n\n"
                 "코호트 구축 후 다시 시도하세요.")

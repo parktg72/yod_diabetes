@@ -722,3 +722,34 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
 - Codex first-review result:
   - PASS.
   - Ready for Claude second review.
+
+### 2026-05-11 - tabs.py broad except cleanup 마무리 라운드
+
+- Implemented in `tabs.py`:
+  - `AnalysisTab._confirm_sampling_if_needed` row-count 조회 실패 로그를
+    `logger.warning("final_analysis 행 수 조회 실패", exc_info=True)`로 변경.
+  - `DataLoadTab.do_load` per-table load 실패 `except Exception as e:` 블록에
+    의도 주석 추가:
+    `# 개별 테이블 실패는 수집하고 다음 테이블 로드를 계속한다.`
+  - `errors[tn] = str(e)` 및 except 동작은 그대로 유지.
+- Verification:
+  - `PYTHONPYCACHEPREFIX=/private/tmp/pycache python3 -m py_compile tabs.py` -> pass
+  - `pytest tests/ -q` -> `437 passed`
+  - `git diff --check` -> clean
+
+### 2026-05-11 - Claude 2차 리뷰 수신 (tabs.py broad except cleanup 마무리)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - `DataLoadTab.do_load` continue-on-error comment is placed appropriately.
+  - `AnalysisTab._confirm_sampling_if_needed` `exc_info=True` logging is an appropriate diagnostic improvement.
+- Cleanup status:
+  - ResultsTab duplicate handlers merged.
+  - MemoryTab bare pass replaced with debug logging.
+  - HanaBrowserTab duplicate handlers merged.
+  - AnalysisTab row-count lookup logging improved.
+  - DataLoadTab per-table broad except marked as intentional.
+- Next candidates:
+  - Wrapper docstring mini-round.
+  - HANA mocking test strengthening for `on_tree_click` and `search_hana_tables`.
