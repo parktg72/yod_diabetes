@@ -100,15 +100,15 @@ class StatisticalAnalyzer:
             )
 
     def _skip_result(self, reason_code, reason, *, stage=None, **extra):
-        """명시적 분석 skip 결과의 공통 스키마."""
+        """utils.make_skip_result 위임 wrapper."""
         return make_skip_result(reason_code, reason, stage=stage, **extra)
 
     def _model_failure(self, reason_code, reason, *, stage='cox', **extra):
-        """모델별 실패 결과의 공통 스키마."""
+        """utils.make_model_failure 위임 wrapper."""
         return make_model_failure(reason_code, reason, stage=stage, **extra)
 
     def _error_result(self, reason_code, error, *, stage=None, **extra):
-        """예외 기반 분석 실패 결과의 공통 스키마."""
+        """utils.make_error_result 위임 wrapper."""
         return make_error_result(reason_code, error, stage=stage, **extra)
 
     def _load_data(self, cb=None):

@@ -293,6 +293,14 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
   - PASS.
   - Ready for Claude second review.
 
+### 2026-05-11 - Claude 2차 리뷰 수신 (Wrapper docstring mini-round)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - The `utils.{function_name} 위임 wrapper` docstrings are accurate and sufficient.
+  - Function bodies, call sites, tests, and baseline remain unchanged.
+
 ### 2026-05-11 - Claude 2차 리뷰 수신 (HANA mocking 테스트 강화)
 
 - Claude second review:
@@ -780,6 +788,24 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
   - `git diff --check` -> clean
 - Codex verification:
   - `pytest tests/test_stage_s.py -q` -> `14 passed`
+  - `pytest tests/ -q` -> `440 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-11 - Wrapper docstring mini-round
+
+- Scope:
+  - `statistical_analysis.py` wrapper 3개 docstring만 교체.
+  - 함수 본문/호출부/테스트/설정 파일은 미변경.
+- Applied docstrings:
+  - `_skip_result`: `"""utils.make_skip_result 위임 wrapper."""`
+  - `_model_failure`: `"""utils.make_model_failure 위임 wrapper."""`
+  - `_error_result`: `"""utils.make_error_result 위임 wrapper."""`
+- Verification:
+  - `PYTHONPYCACHEPREFIX=/private/tmp/pycache python3 -m py_compile statistical_analysis.py` -> pass
+  - `pytest tests/test_utils.py tests/test_stage_n.py -q` -> `50 passed`
   - `pytest tests/ -q` -> `440 passed`
   - `git diff --check` -> clean
 - Codex first-review result:
