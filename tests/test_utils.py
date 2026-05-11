@@ -6,7 +6,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from utils import icd_like, format_hr, format_number, make_error_result
+from utils import (
+    icd_like,
+    format_hr,
+    format_number,
+    make_error_result,
+    make_skip_result,
+    make_model_failure,
+)
 
 
 class TestIcdLike:
@@ -115,3 +122,58 @@ class TestMakeErrorResult:
         assert result["stage"] == "stage_o"
         assert result["failed_outcome"] == "ad_event"
         assert result["retryable"] is False
+
+
+class TestMakeSkipResult:
+    def test_includes_required_fields(self):
+        result = make_skip_result("INSUFFICIENT_DATA", "rows<min")
+
+        assert result["skipped"] is True
+        assert result["reason_code"] == "INSUFFICIENT_DATA"
+        assert result["reason"] == "rows<min"
+
+    def test_omits_stage_when_none(self):
+        result = make_skip_result("NO_MATCH", "no rows", stage=None)
+
+        assert "stage" not in result
+
+    def test_includes_stage_and_extra(self):
+        result = make_skip_result(
+            "NO_MATCH",
+            "no rows",
+            stage="psm",
+            matched_n=0,
+            retryable=False,
+        )
+
+        assert result["stage"] == "psm"
+        assert result["matched_n"] == 0
+        assert result["retryable"] is False
+
+
+class TestMakeModelFailure:
+    def test_includes_required_fields_and_default_stage(self):
+        result = make_model_failure("COX_MODEL_FAILED", "convergence error")
+
+        assert result["reason_code"] == "COX_MODEL_FAILED"
+        assert result["reason"] == "convergence error"
+        assert result["stage"] == "cox"
+        assert "skipped" not in result
+
+    def test_omits_stage_when_none(self):
+        result = make_model_failure("COX_MODEL_FAILED", "convergence error", stage=None)
+
+        assert "stage" not in result
+
+    def test_merges_extra_fields(self):
+        result = make_model_failure(
+            "COX_MODEL_FAILED",
+            "singular matrix",
+            stage="psm",
+            failed_outcome="ad_event",
+            retryable=True,
+        )
+
+        assert result["stage"] == "psm"
+        assert result["failed_outcome"] == "ad_event"
+        assert result["retryable"] is True

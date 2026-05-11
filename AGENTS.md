@@ -60,7 +60,7 @@ grep -n "def run_cox" statistical_analysis.py
 
 1. 실패 테스트 먼저 작성
 2. 구현
-3. `pytest tests/ -q` — **431 passed, 0 failed** 기준선 유지
+3. `pytest tests/ -q` — **437 passed, 0 failed** 기준선 유지
 4. 기준선 미달 시 작업 중단, 원인 파악 후 보고
 
 ### 3. 권한 (표준 B)

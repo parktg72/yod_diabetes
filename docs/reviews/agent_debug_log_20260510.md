@@ -293,6 +293,18 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
   - PASS.
   - Ready for Claude second review.
 
+### 2026-05-11 - Claude 2차 리뷰 수신 (Helper 통합 follow-up)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - `utils.py` is an appropriate shared location for all three result helpers.
+  - `make_model_failure` default `stage='cox'` preserves existing behavior.
+  - Helper schema differences remain clear and intentional.
+- Non-blocking follow-up candidates:
+  - Update thin-wrapper docstrings for `_skip_result`, `_model_failure`, and `_error_result`.
+  - Proceed to `tabs.py` broad exception cleanup in a later GUI-focused round.
+
 ### 2026-05-11 - Claude 2차 리뷰 수신 (Helper 통합 mini-round)
 
 - Claude second review:
@@ -305,6 +317,25 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
   - Clarify the `_error_result` wrapper docstring later.
   - Consider `_skip_result` and `_model_failure` helper consolidation in a separate round.
   - Handle `tabs.py` broad exception paths in a later GUI-focused round.
+
+### 2026-05-11 - Helper 통합 follow-up: skip/model failure 공통화
+
+- Scope agreed with Claude:
+  - Move `_skip_result` and `_model_failure` schema creation into `utils` helpers.
+  - Keep `StatisticalAnalyzer` methods as thin wrappers to avoid call-site churn.
+  - Defer `tabs.py` broad exception cleanup.
+- Hermes coding:
+  - Added `utils.make_skip_result(reason_code, reason, *, stage=None, **extra)`.
+  - Added `utils.make_model_failure(reason_code, reason, *, stage='cox', **extra)`.
+  - Updated `StatisticalAnalyzer._skip_result` and `_model_failure` to delegate to the shared helpers.
+  - Added `tests/test_utils.py` coverage for both helper schemas.
+- Codex verification:
+  - `pytest tests/test_utils.py tests/test_stage_n.py tests/test_stage_o.py tests/test_run_selected.py -q` -> `61 passed`
+  - `pytest tests/ -q` -> `437 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
 
 ### 2026-05-11 - Claude 2차 리뷰 수신 (R2-3c follow-up)
 

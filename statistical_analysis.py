@@ -13,7 +13,13 @@ from lifelines.statistics import proportional_hazard_test
 from scipy import stats
 from config import STUDY_SETTINGS, DEMENTIA_DRUG_CODES
 from memory_manager import mem_manager
-from utils import InsufficientDataError, format_error_for_user, make_error_result
+from utils import (
+    InsufficientDataError,
+    format_error_for_user,
+    make_error_result,
+    make_skip_result,
+    make_model_failure,
+)
 from dataclasses import dataclass
 import duckdb
 
@@ -95,19 +101,11 @@ class StatisticalAnalyzer:
 
     def _skip_result(self, reason_code, reason, *, stage=None, **extra):
         """명시적 분석 skip 결과의 공통 스키마."""
-        result = {'skipped': True, 'reason_code': reason_code, 'reason': reason}
-        if stage is not None:
-            result['stage'] = stage
-        result.update(extra)
-        return result
+        return make_skip_result(reason_code, reason, stage=stage, **extra)
 
     def _model_failure(self, reason_code, reason, *, stage='cox', **extra):
         """모델별 실패 결과의 공통 스키마."""
-        result = {'reason_code': reason_code, 'reason': reason}
-        if stage is not None:
-            result['stage'] = stage
-        result.update(extra)
-        return result
+        return make_model_failure(reason_code, reason, stage=stage, **extra)
 
     def _error_result(self, reason_code, error, *, stage=None, **extra):
         """예외 기반 분석 실패 결과의 공통 스키마."""

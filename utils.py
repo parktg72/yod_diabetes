@@ -70,6 +70,24 @@ def icd_like(col, codes):
     return '(' + ' OR '.join(f"{col} LIKE '{c}%'" for c in codes) + ')'
 
 
+def make_skip_result(reason_code, reason, *, stage=None, **extra):
+    """명시적 분석 skip 결과의 공통 스키마."""
+    result = {'skipped': True, 'reason_code': reason_code, 'reason': reason}
+    if stage is not None:
+        result['stage'] = stage
+    result.update(extra)
+    return result
+
+
+def make_model_failure(reason_code, reason, *, stage='cox', **extra):
+    """모델별 실패 결과의 공통 스키마."""
+    result = {'reason_code': reason_code, 'reason': reason}
+    if stage is not None:
+        result['stage'] = stage
+    result.update(extra)
+    return result
+
+
 def make_error_result(reason_code, error, *, stage=None, **extra):
     """예외 기반 실패 결과의 공통 스키마."""
     result = {
