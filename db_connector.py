@@ -411,6 +411,32 @@ class HANAConnector:
             raise last_exc
         raise RuntimeError("HANA DB 연결 실패: 재시도 횟수 설정을 확인하세요 (max_retries >= 0).")
 
+    def _reconnect_if_stale(self):
+        """HANA 세션이 없거나 만료되었으면 연결을 복구한다."""
+        if not self.conn:
+            self.connect()
+            return
+
+        cursor = None
+        try:
+            cursor = self.conn.cursor()
+            cursor.execute("SELECT 'OK' FROM DUMMY")
+            cursor.fetchone()
+        except Exception as e:
+            err = str(e)
+            if '-10821' in err or 'session not connected' in err.lower():
+                logger.warning("HANA 세션 만료 감지 (-10821), 재연결 시도")
+                self.conn = None
+                self.connect()
+                return
+            raise
+        finally:
+            if cursor is not None:
+                try:
+                    cursor.close()
+                except Exception:
+                    logger.debug("HANA ping cursor close failed", exc_info=True)
+
     def test_connection(self):
         try:
             self.connect()
@@ -798,8 +824,7 @@ class HANAConnector:
         """
         if chunk_size is None:
             chunk_size = chunk_controller.get_chunk('hana')
-        if not self.conn:
-            self.connect()
+        self._reconnect_if_stale()
         col_str = ', '.join(f'"{c}"' for c in columns) if columns else '*'
         select_prefix = 'SELECT DISTINCT' if distinct else 'SELECT'
         from_clause = f'"{schema_name}"."{table_name}"' if schema_name else f'"{table_name}"'

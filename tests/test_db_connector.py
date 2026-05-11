@@ -1239,6 +1239,74 @@ def _mock_hdbcli(connect_side_effect=None, connect_return=None):
     return mock_hdbcli, mock_dbapi
 
 
+class TestHANAConnectorReconnectIfStale:
+    """HANAConnector._reconnect_if_stale(): 만료된 HANA 세션 재연결."""
+
+    def test_reconnect_if_stale_connects_when_no_conn(self):
+        """conn이 없으면 connect()를 호출한다."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        conn.conn = None
+        conn.connect = MagicMock(return_value=True)
+
+        conn._reconnect_if_stale()
+
+        conn.connect.assert_called_once_with()
+
+    def test_reconnect_if_stale_noop_when_healthy(self):
+        """ping이 성공하면 기존 연결을 유지하고 재연결하지 않는다."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        hana_conn = MagicMock()
+        cursor = hana_conn.cursor.return_value
+        cursor.fetchone.return_value = ('OK',)
+        conn.conn = hana_conn
+        conn.connect = MagicMock(return_value=True)
+
+        conn._reconnect_if_stale()
+
+        cursor.execute.assert_called_once_with("SELECT 'OK' FROM DUMMY")
+        cursor.fetchone.assert_called_once_with()
+        cursor.close.assert_called_once_with()
+        conn.connect.assert_not_called()
+        assert conn.conn is hana_conn
+
+    def test_reconnect_if_stale_reconnects_on_10821(self):
+        """-10821(Session not connected)이면 conn을 버리고 재연결한다."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        stale_conn = MagicMock()
+        cursor = stale_conn.cursor.return_value
+        cursor.execute.side_effect = RuntimeError("SAP DBTech JDBC: [-10821] Session not connected")
+        new_conn = MagicMock()
+
+        def fake_connect():
+            conn.conn = new_conn
+            return True
+
+        conn.conn = stale_conn
+        conn.connect = MagicMock(side_effect=fake_connect)
+
+        conn._reconnect_if_stale()
+
+        cursor.close.assert_called_once_with()
+        conn.connect.assert_called_once_with()
+        assert conn.conn is new_conn
+
+    def test_reconnect_if_stale_raises_on_other_errors(self):
+        """-10821 외 ping 오류는 원인을 숨기지 않고 그대로 전파한다."""
+        conn = HANAConnector('host', 30015, 'user', 'pw')
+        hana_conn = MagicMock()
+        cursor = hana_conn.cursor.return_value
+        cursor.execute.side_effect = RuntimeError("permission denied")
+        conn.conn = hana_conn
+        conn.connect = MagicMock(return_value=True)
+
+        with pytest.raises(RuntimeError, match="permission denied"):
+            conn._reconnect_if_stale()
+
+        cursor.close.assert_called_once_with()
+        conn.connect.assert_not_called()
+        assert conn.conn is hana_conn
+
+
 class TestHANAConnectorRetry:
     """HANAConnector.connect(): 네트워크 오류 시 max_retries회 재시도."""
 
