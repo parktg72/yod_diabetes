@@ -486,12 +486,8 @@ class HanaBrowserTab(QWidget):
                 item.setData(0, Qt.UserRole, {'type': 'schema', 'name': s})
                 self.hana_tree.addTopLevelItem(item)
             self.log_signal.emit(f"스키마 {len(schemas)}개 로드됨")
-        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
-                MemoryError, CohortStepError) as e:
-            logger.exception("HANA 스키마 로드 실패")
-            QMessageBox.critical(self, "오류", format_error_for_user(e))
         except Exception as e:
-            logger.exception("HANA 스키마 로드 중 예기치 않은 오류")
+            logger.exception("HANA 스키마 로드 실패")
             QMessageBox.critical(self, "오류", format_error_for_user(e))
 
     def on_tree_click(self, item, col):
@@ -517,12 +513,8 @@ class HanaBrowserTab(QWidget):
                     self.column_table.setItem(i, 3, QTableWidgetItem(c.get('nullable', '')))
                     self.column_table.setItem(i, 4, QTableWidgetItem(c.get('comment', '') or ''))
                 self.column_table.resizeColumnsToContents()
-        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
-                MemoryError, CohortStepError) as e:
-            logger.exception("HANA 트리 클릭 오류")
-            self.log_signal.emit(f"오류: {format_error_for_user(e)}")
         except Exception as e:
-            logger.exception("HANA 트리 클릭 중 예기치 않은 오류")
+            logger.exception("HANA 트리 클릭 오류")
             self.log_signal.emit(f"오류: {format_error_for_user(e)}")
 
     def search_hana_tables(self):
@@ -550,12 +542,8 @@ class HanaBrowserTab(QWidget):
             self.hana_tree.addTopLevelItem(parent)
             parent.setExpanded(True)
             self.log_signal.emit(f"'{kw}' 검색: {len(results)}개")
-        except (duckdb.Error, pd.errors.EmptyDataError, ValueError,
-                MemoryError, CohortStepError) as e:
-            logger.exception("HANA 검색 실패")
-            self.log_signal.emit(f"검색 오류: {format_error_for_user(e)}")
         except Exception as e:
-            logger.exception("HANA 검색 중 예기치 않은 오류")
+            logger.exception("HANA 검색 실패")
             self.log_signal.emit(f"검색 오류: {format_error_for_user(e)}")
 
     def map_selected_to_load(self):

@@ -293,6 +293,18 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
   - PASS.
   - Ready for Claude second review.
 
+### 2026-05-11 - Claude 2차 리뷰 수신 (HanaBrowserTab cleanup)
+
+- Claude second review:
+  - Decision: PASS.
+  - Blocking findings: none.
+  - `HanaBrowserTab` single-except merge follows the same standard as the `ResultsTab` cleanup.
+  - Leaving HANA mocking tests for a separate test-strengthening round is acceptable.
+- Next candidates:
+  - `AnalysisTab._confirm_sampling_if_needed` plus `DataLoadTab.do_load` broad-except cleanup.
+  - HANA mocking test strengthening for `on_tree_click` and `search_hana_tables`.
+  - Thin-wrapper docstring cleanup for `_skip_result`, `_model_failure`, and `_error_result`.
+
 ### 2026-05-11 - Claude 2차 리뷰 수신 (tabs.py broad except cleanup 1차)
 
 - Claude second review:
@@ -680,6 +692,32 @@ Track Codex-Claude-Hermes debugging decisions, review handoffs, and test evidenc
   - `pytest tests/test_utils.py tests/test_analysis_runner.py tests/test_stage_n.py tests/test_run_selected.py -q` -> `56 passed`
   - `PYTHONPYCACHEPREFIX=/private/tmp/pycache python3 -m py_compile utils.py analysis_runner.py statistical_analysis.py` -> pass
   - `pytest tests/ -q` -> `431 passed`
+  - `git diff --check` -> clean
+- Codex first-review result:
+  - PASS.
+  - Ready for Claude second review.
+
+### 2026-05-11 - HanaBrowserTab exception handling cleanup
+
+- Scope:
+  - `tabs.py`의 `HanaBrowserTab` 3개 메서드(`load_schemas`, `on_tree_click`, `search_hana_tables`)에서 typed expected 예외 tuple 제거.
+  - 각 메서드는 단일 `except Exception as e:`만 유지.
+  - 로그 메시지 고정:
+    - `HANA 스키마 로드 실패`
+    - `HANA 트리 클릭 오류`
+    - `HANA 검색 실패`
+  - 사용자 표시 동작 유지:
+    - `QMessageBox.critical(self, "오류", format_error_for_user(e))`
+    - `self.log_signal.emit(f"오류: {format_error_for_user(e)}")`
+    - `self.log_signal.emit(f"검색 오류: {format_error_for_user(e)}")`
+- Out of scope:
+  - helper 추가 없음.
+  - HANA mocking 테스트 추가 없음.
+  - 다른 탭(Connection/DataLoad/Analysis/Results) 변경 없음.
+- Codex verification:
+  - `PYTHONPYCACHEPREFIX=/private/tmp/pycache python3 -m py_compile tabs.py` -> pass
+  - `pytest tests/test_stage_s.py -q` -> `11 passed`
+  - `pytest tests/ -q` -> `437 passed`
   - `git diff --check` -> clean
 - Codex first-review result:
   - PASS.
