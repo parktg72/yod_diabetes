@@ -124,12 +124,12 @@ test_run_subgroup_includes_med_switch()
 
 ### 결과 시각화
 - [ ] KM plot: T2DM_OHA 약물전환별 생존곡선
-- [ ] Forest plot: 약물전환 분층별 HR 및 95% CI
+- [x] Forest plot: ⚠️ 비활성화 (T2DM_OHA 서브그룹 내 is_t1dm HR 비교 임상 무의미)
 - [ ] 상호작용 그래프: 노출군 × 약물전환 2-way interaction
 
 ### 보고서 작성
 - [ ] Tables: 분층별 기초 특성, Cox 결과, 상호작용 p-value
-- [ ] Figures: KM, Forest, Interaction plots
+- [ ] Figures: KM plot (forest plot 비활성화됨)
 - [ ] 결론: 약물전환의 임상적 의미 해석
 
 ### Competing Risk 분석 (선택)

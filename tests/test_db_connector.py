@@ -973,6 +973,35 @@ class TestDataManagerConnectHana:
         assert dm.hana is connector
 
 
+class TestDataManagerHanaBrowsingReconnect:
+    """DataManager HANA browsing wrapper가 stale reconnect를 선호해야 한다."""
+
+    @pytest.mark.parametrize(
+        "method_name,args,delegate_name,delegate_args,expected",
+        [
+            ("get_hana_schemas", tuple(), "list_schemas", tuple(), ["NHIS"]),
+            ("get_hana_tables", ("NHIS",), "list_tables", ("NHIS",), ["T20"]),
+            ("get_hana_columns", ("NHIS", "T20"), "list_columns", ("NHIS", "T20"), ["INDI_DSCM_NO"]),
+            ("search_hana_tables", ("NHIS", "T2"), "search_tables", ("NHIS", "T2"), ["T20"]),
+        ],
+    )
+    def test_hana_browsing_wrappers_call_reconnect_if_stale_and_delegate(
+        self, tmp_path, method_name, args, delegate_name, delegate_args, expected
+    ):
+        dm = DataManager(work_dir=str(tmp_path))
+        hana = MagicMock(spec=HANAConnector)
+        hana.conn = object()
+        hana._reconnect_if_stale = MagicMock()
+        setattr(hana, delegate_name, MagicMock(return_value=expected))
+        dm.hana = hana
+
+        result = getattr(dm, method_name)(*args)
+
+        hana._reconnect_if_stale.assert_called_once_with()
+        getattr(hana, delegate_name).assert_called_once_with(*delegate_args)
+        assert result == expected
+
+
 # ===========================================================================
 # CohortIDExtractor 테스트
 # ===========================================================================

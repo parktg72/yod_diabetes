@@ -84,11 +84,12 @@ phase2_run.bat :memory: phase2_output  # 테스트용
 phase2_output/
 ├── phase2_report_YYYYMMDD_HHMMSS.log      # 실행 로그
 ├── km_t2dm_oha_switch.png                 # KM 생존곡선
-├── forest_t2dm_oha_switch.png             # Forest plot
 ├── table_baseline.csv                     # 기초 특성 표
 ├── table_cox_results.csv                  # Cox 결과 표
 └── INTERPRETATION_GUIDE.md                # 임상 해석 가이드
 ```
+
+참고: `forest_t2dm_oha_switch.png`는 비활성화되어 생성되지 않는 것이 정상입니다.
 
 ---
 
@@ -224,7 +225,7 @@ phase2_run.bat nhis_analysis.duckdb phase2_output
 ### 결과 검증
 - [ ] `phase2_output/` 디렉토리 생성됨
 - [ ] `.log` 파일에 "[SUCCESS]" 메시지 있음
-- [ ] PNG 파일 (KM, forest) 생성됨
+- [ ] PNG 파일 (KM: km_t2dm_oha_switch.png) 생성됨
 - [ ] CSV 파일 (baseline, cox) 생성됨
 - [ ] INTERPRETATION_GUIDE.md 생성됨
 
@@ -237,7 +238,7 @@ phase2_run.bat nhis_analysis.duckdb phase2_output
 phase2_visualization.py      # KM curves, tables
   ├── Phase2Visualizer class
   ├── plot_km_curves()
-  ├── plot_forest_plot()
+  ├── plot_forest_plot()  # ⚠️ 비활성화: 항상 None 반환 (임상적 무의미)
   ├── create_baseline_table()
   └── create_cox_results_table()
 
@@ -255,9 +256,9 @@ statistical_analysis.py      # Phase 2 변수 추가
 
 ### 임상 해석
 - **KM 곡선**: T2DM_OHA 환자의 약물전환 여부별 치매 위험
-- **Forest plot**: 서브그룹별 HR 비교
+- **Cox results table**: 서브그룹별 HR 비교 (forest plot 비활성화)
 - **Baseline table**: 약물전환 그룹의 특성 차이
-- **Cox results**: 다변량 분석 결과
+- **Cox results**: 다변량 분석 결과(HR, 95% CI, p-value) 중심 해석
 
 ---
 
@@ -268,5 +269,50 @@ statistical_analysis.py      # Phase 2 변수 추가
 
 ---
 
-**마지막 업데이트**: 2026-04-19  
+## 11. 폐쇄망 실제 데이터 검증 절차
+
+### 실행 전
+- [ ] 입력 DB 파일 경로/권한 확인 (`.duckdb` 읽기 가능)
+- [ ] 출력 디렉토리 쓰기 권한 확인
+- [ ] 가상환경 활성화: `call venv\Scripts\activate.bat`
+- [ ] 필수 패키지 import 점검: `python -c "import pandas, lifelines, matplotlib; print('OK')"`
+- [ ] 폐쇄망 HANA 추출부터 수행하는 경우 DB 브라우저 탭에서 스키마 목록 로드 확인
+
+### 실행 중 모니터링
+- [ ] `phase2_report_*.log` 생성 여부 확인
+- [ ] `[Step 1]`부터 `[Step 7]`까지 순차 진행 확인
+- [ ] `Forest plot 비활성화` WARNING은 정상 메시지로 처리
+- [ ] 로그 내 오류/예외(traceback) 발생 여부 실시간 확인
+- [ ] 장시간 정지 시 CPU/메모리 사용량 및 I/O 상태 확인
+
+### 산출물 기준
+- [ ] `phase2_report_*.log` 생성, 최종 완료 메시지 포함
+- [ ] `km_t2dm_oha_switch.png` 생성, 파일 크기 0보다 큼
+- [ ] `table_baseline.csv` 생성, 행 수 0보다 큼
+- [ ] `table_cox_results.csv` 생성, `HR`, `CI_lower`, `CI_upper`, `p_value` 컬럼 포함
+- [ ] `INTERPRETATION_GUIDE.md` 생성
+- [ ] `forest_t2dm_oha_switch.png`는 비활성화로 미생성 정상
+
+### 데이터 품질 확인
+- [ ] 분석 대상 행 수(코호트 크기)와 이벤트 수가 0이 아닌지 확인
+- [ ] T2DM_OHA 중 `had_insulin_switch=1` 전환율 확인
+- [ ] `t2dm_oha_noswitch`, `t2dm_oha_switch` 결과 행 존재 확인
+- [ ] 주요 변수 결측률/이상치(음수 추적기간 등) 확인
+- [ ] 그룹별 표본 수 극단적 불균형 여부 확인
+
+### 통계 해석 주의
+- [ ] 약물전환 변수 해석 시 Immortal Time Bias 가능성 명시
+- [ ] Forest 미생성으로 시각 비교 대신 Cox 결과표(HR, 95% CI, p-value) 중심 해석
+- [ ] 다중 검정 보정 여부(Bonferroni 등) 확인 후 결론 기술
+
+### 실패 시 수집 로그
+- [ ] 전체 실행 로그: `phase2_report_*.log`
+- [ ] 실행 명령어/실행 시각/DB 경로(마스킹 가능)
+- [ ] Python 버전 및 `pip list` 주요 패키지 버전
+- [ ] 실패 재현 단계(최소 입력, 재시도 횟수)
+- [ ] HANA 오류가 있으면 오류 코드와 마지막 성공 스키마/테이블 조회 기록
+
+---
+
+**마지막 업데이트**: 2026-05-14  
 **상태**: ✅ Windows Python 3.12 호환성 확인 완료

@@ -2597,29 +2597,25 @@ class DataManager:
     def get_hana_schemas(self):
         if not self.hana:
             raise RuntimeError("HANA 미연결")
-        if not self.hana.conn:
-            self.hana.connect()
+        self.hana._reconnect_if_stale()
         return self.hana.list_schemas()
 
     def get_hana_tables(self, schema_name):
         if not self.hana:
             raise RuntimeError("HANA 미연결")
-        if not self.hana.conn:
-            self.hana.connect()
+        self.hana._reconnect_if_stale()
         return self.hana.list_tables(schema_name)
 
     def get_hana_columns(self, schema_name, table_name):
         if not self.hana:
             raise RuntimeError("HANA 미연결")
-        if not self.hana.conn:
-            self.hana.connect()
+        self.hana._reconnect_if_stale()
         return self.hana.list_columns(schema_name, table_name)
 
     def search_hana_tables(self, schema_name, keyword):
         if not self.hana:
             raise RuntimeError("HANA 미연결")
-        if not self.hana.conn:
-            self.hana.connect()
+        self.hana._reconnect_if_stale()
         return self.hana.search_tables(schema_name, keyword)
 
     def extract_cohort_ids(self, hana_schema, force=True, progress_callback=None):

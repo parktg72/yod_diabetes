@@ -9,7 +9,6 @@ Phase 2 Statistical Analysis 결과 시각화
 
 from pathlib import Path
 import pandas as pd
-import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import rcParams
 from lifelines import KaplanMeierFitter
@@ -113,89 +112,15 @@ class Phase2Visualizer:
 
     def plot_forest_plot(self, cox_results: Dict[str, Any], figname: str = 'forest_t2dm_oha_switch.png') -> Optional[str]:
         """
-        Forest plot: T2DM_OHA 약물전환 분층별 HR
+        Forest plot 비활성화.
 
-        Args:
-            cox_results: run_subgroup()의 결과 딕셔너리
-            figname: 저장 파일명
-
-        Returns:
-            저장된 파일 경로, 또는 데이터 부족 시 None
+        T2DM_OHA 내부 약물전환 서브그룹에서 is_t1dm HR을 forest plot으로
+        시각화하는 것은 임상적으로 무의미하여 항상 스킵한다.
         """
-        # 약물전환 분층별 결과 추출
-        subgroups = ['t2dm_oha_noswitch', 't2dm_oha_switch']
-        labels = ['No med switch', 'Med switch']
-
-        hrs = []
-        ci_lowers = []
-        ci_uppers = []
-        ps = []
-
-        for sg in subgroups:
-            if sg not in cox_results or 'hr_data' not in cox_results[sg]:
-                continue
-
-            # is_t1dm HR 추출 (노출 지시변수 중 하나)
-            hr_data = cox_results[sg]['hr_data']
-            if 'is_t1dm' in hr_data:
-                hrs.append(hr_data['is_t1dm']['hr'])
-                ci_lowers.append(hr_data['is_t1dm']['ci_lower'])
-                ci_uppers.append(hr_data['is_t1dm']['ci_upper'])
-                ps.append(hr_data['is_t1dm']['p_value'])
-
-        if not hrs:
-            logger.warning("Forest plot 생성 불가: HR 데이터 부족")
-            return None
-
-        # CI 폭 계산
-        errors = [
-            [hrs[i] - ci_lowers[i] for i in range(len(hrs))],
-            [ci_uppers[i] - hrs[i] for i in range(len(hrs))]
-        ]
-
-        fig, ax = plt.subplots(figsize=(10, 6))
-
-        y_pos = np.arange(len(labels))
-        ax.errorbar(
-            hrs, y_pos,
-            xerr=errors,
-            fmt='o',
-            markersize=8,
-            capsize=5,
-            capthick=2,
-            color='darkblue',
-            ecolor='darkblue',
-            elinewidth=2
+        logger.warning(
+            "Forest plot 비활성화: T2DM_OHA 약물전환 서브그룹의 is_t1dm HR 시각화는 임상적으로 무의미합니다."
         )
-
-        # 1.0 기준선 (null)
-        ax.axvline(x=1.0, color='red', linestyle='--', linewidth=1.5, alpha=0.7, label='HR=1.0')
-
-        # 데이터 레이블
-        for i, (hr, p) in enumerate(zip(hrs, ps)):
-            ax.text(
-                hr + 0.1, i,
-                f'HR={hr:.2f} (p={p:.4f})',
-                fontsize=10,
-                verticalalignment='center'
-            )
-
-        ax.set_yticks(y_pos)
-        ax.set_yticklabels(labels)
-        ax.set_xlabel('Hazard Ratio (95% CI)', fontsize=12)
-        ax.set_title('T2DM_OHA: Hazard Ratio by med switch status (reference: T1DM)', fontsize=14, fontweight='bold')
-        ax.grid(True, alpha=0.3, axis='x')
-        ax.legend()
-
-        filepath = self.output_dir / figname
-        plt.tight_layout()
-        try:
-            plt.savefig(str(filepath), dpi=300, bbox_inches='tight')
-            logger.info(f"Forest plot saved: {filepath}")
-        finally:
-            plt.close()
-
-        return str(filepath)
+        return None
 
     def create_baseline_table(self, df: pd.DataFrame, figname: str = 'table_baseline.csv') -> Optional[str]:
         """

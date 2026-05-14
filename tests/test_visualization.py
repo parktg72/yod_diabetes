@@ -9,6 +9,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from visualization import Visualizer
+from phase2_visualization import Phase2Visualizer
 
 
 class TestPlotKmEmptyGuard:
@@ -117,3 +118,43 @@ class TestPlotCifKeyGuard:
         result = viz.plot_cif(cif_data)
         assert result is not None, "완전한 그룹이 있으면 파일 생성 기대"
         assert Path(result).exists()
+
+
+class TestPhase2ForestPlotDisabled:
+    """Phase2Visualizer.plot_forest_plot 비활성화 검증."""
+
+    def test_phase2_forest_plot_returns_none_and_does_not_create_file(self, tmp_path, caplog):
+        viz = Phase2Visualizer(output_dir=str(tmp_path))
+
+        cox_results = {
+            't2dm_oha_noswitch': {
+                'hr_data': {
+                    'is_t1dm': {
+                        'hr': 1.2,
+                        'ci_lower': 0.9,
+                        'ci_upper': 1.6,
+                        'p_value': 0.12,
+                    }
+                }
+            },
+            't2dm_oha_switch': {
+                'hr_data': {
+                    'is_t1dm': {
+                        'hr': 1.4,
+                        'ci_lower': 1.0,
+                        'ci_upper': 2.0,
+                        'p_value': 0.03,
+                    }
+                }
+            },
+        }
+
+        with caplog.at_level('WARNING'):
+            result = viz.plot_forest_plot(cox_results, figname='forest_t2dm_oha_switch.png')
+
+        assert result is None
+        assert not (tmp_path / 'forest_t2dm_oha_switch.png').exists()
+        assert any(
+            ('비활성화' in message) or ('무의미' in message)
+            for message in caplog.messages
+        )
