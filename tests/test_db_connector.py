@@ -1577,9 +1577,8 @@ class TestDuckDBStorageSchemaMismatchBackup:
 
         # 재연결로 새로운 빈 DuckDB 파일이 생성됨
         assert db_path.exists()
-        assert db_path.read_bytes() != sentinel
-
         storage.close()
+        assert db_path.read_bytes() != sentinel
 
 
 class TestCohortIDExtractorEmptyResult:
