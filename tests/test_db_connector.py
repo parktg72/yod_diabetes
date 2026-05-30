@@ -190,6 +190,137 @@ class TestMonthlyHanaExtractor:
 
         assert not stale.exists(), "기존 stale Parquet 파일이 삭제되어야 함"
 
+    def test_resume_stale_tmp_cleanup_ignores_locked_file(self, monkeypatch, tmp_path):
+        """Windows가 stale .tmp.parquet를 잠가도 resume 정리는 경고 후 계속되어야 한다."""
+        import pathlib
+
+        cache_dir = tmp_path / 'T20'
+        cache_dir.mkdir()
+        locked_tmp = cache_dir / 'T20_201212.tmp.parquet'
+        locked_tmp.write_bytes(b'locked')
+
+        original_unlink = pathlib.Path.unlink
+
+        def fake_unlink(self, *args, **kwargs):
+            if self == locked_tmp:
+                raise PermissionError("locked by another process")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, 'unlink', fake_unlink)
+
+        df_sample = pd.DataFrame({'INDI_DSCM_NO': ['10001'], 'CMN_KEY': ['K001']})
+
+        def fake_fetch(table, schema, where_clause=None, **kwargs):
+            if where_clause and '201301' in where_clause:
+                yield df_sample
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.side_effect = fake_fetch
+        mock_hana._detect_column_type.return_value = 'NVARCHAR'
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 1
+
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013,
+            'STUDY_END_YEAR': 2013,
+        }):
+            extractor.extract_all_months('T20', 'T20', force=False)
+
+        assert locked_tmp.exists()
+
+    def test_force_cache_cleanup_ignores_locked_tmp_file(self, monkeypatch, tmp_path):
+        """force=True 기본 경로에서도 잠긴 stale tmp 때문에 재실행이 중단되면 안 된다."""
+        import pathlib
+
+        cache_dir = tmp_path / 'T20'
+        cache_dir.mkdir()
+        locked_tmp = cache_dir / 'T20_201212.tmp.parquet'
+        locked_tmp.write_bytes(b'locked')
+
+        original_unlink = pathlib.Path.unlink
+
+        def fake_unlink(self, *args, **kwargs):
+            if self == locked_tmp:
+                raise PermissionError("locked by another process")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, 'unlink', fake_unlink)
+
+        df_sample = pd.DataFrame({'INDI_DSCM_NO': ['10001'], 'CMN_KEY': ['K001']})
+
+        def fake_fetch(table, schema, where_clause=None, **kwargs):
+            if where_clause and '201301' in where_clause:
+                yield df_sample
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.side_effect = fake_fetch
+        mock_hana._detect_column_type.return_value = 'NVARCHAR'
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 1
+
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013,
+            'STUDY_END_YEAR': 2013,
+        }):
+            extractor.extract_all_months('T20', 'T20', force=True)
+
+        assert locked_tmp.exists()
+
+    def test_force_cache_cleanup_aborts_on_locked_final_parquet_before_fetch(self, monkeypatch, tmp_path):
+        """force=True에서 기존 final parquet가 잠겨 있으면 HANA 재조회 전에 명확히 중단해야 한다."""
+        import pathlib
+
+        cache_dir = tmp_path / 'T20'
+        cache_dir.mkdir()
+        locked_cache = cache_dir / 'T20_201301.parquet'
+        pd.DataFrame({'INDI_DSCM_NO': ['10001'], 'CMN_KEY': ['K001']}).to_parquet(str(locked_cache), index=False)
+
+        original_unlink = pathlib.Path.unlink
+
+        def fake_unlink(self, *args, **kwargs):
+            if self == locked_cache:
+                raise PermissionError("locked by another process")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, 'unlink', fake_unlink)
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.return_value = iter([])
+        mock_hana._detect_column_type.return_value = 'NVARCHAR'
+        mock_storage = MagicMock()
+
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013,
+            'STUDY_END_YEAR': 2013,
+        }):
+            with pytest.raises(RuntimeError, match='잠긴 캐시'):
+                extractor.extract_all_months('T20', 'T20', force=True)
+
+        assert locked_cache.exists()
+        mock_hana.fetch_table_chunked.assert_not_called()
+
+    def test_extract_prevalidates_cohort_ids_before_deleting_cache(self, tmp_path):
+        """불량 cohort ID가 있으면 기존 캐시 삭제 전에 실패해야 한다."""
+        cache_dir = tmp_path / 'T20'
+        cache_dir.mkdir()
+        stale = cache_dir / 'T20_201301.parquet'
+        pd.DataFrame({'INDI_DSCM_NO': ['10001'], 'CMN_KEY': ['K001']}).to_parquet(str(stale), index=False)
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_table_chunked.return_value = iter([])
+        mock_hana._detect_column_type.return_value = 'NVARCHAR'
+        mock_storage = MagicMock()
+
+        extractor = MonthlyHanaExtractor(mock_hana, mock_storage, 'SCH', str(tmp_path))
+        with pytest.raises(ValueError, match="유효하지 않은 INDI_DSCM_NO"):
+            extractor.extract_all_months('T20', 'T20', force=True, cohort_ids=['10001', 'BAD_ID'])
+
+        assert stale.exists()
+        mock_hana.fetch_table_chunked.assert_not_called()
+
     def test_extract_calls_fetch_with_monthly_where(self, tmp_path):
         """각 월에 MDCARE_STRT_YYYYMM WHERE 절을 사용해 fetch 호출 확인."""
         df_sample = pd.DataFrame({'INDI_DSCM_NO': ['A001'], 'CMN_KEY': ['K001']})
@@ -1112,6 +1243,62 @@ class TestCohortIDWhereParts:
         with pytest.raises(ValueError, match="유효하지 않은 INDI_DSCM_NO"):
             _cohort_id_where_parts(frozenset(['A001']))
 
+    def test_load_table_prevalidates_cohort_ids_before_mutating_duckdb(self, tmp_path):
+        """후반 chunk의 불량 ID도 DuckDB drop/create 전에 먼저 검증해야 한다."""
+        storage = MagicMock(spec=DuckDBStorage)
+        storage.conn = MagicMock()
+        storage.get_row_count.return_value = 0
+        hana = HANAConnector("localhost", 30015, "user", "pw")
+        hana.fetch_table_chunked = MagicMock(return_value=[
+            pd.DataFrame({"INDI_DSCM_NO": ["1"], "VALUE": [1]})
+        ])
+        cohort_ids = [str(i) for i in range(_COHORT_ID_CHUNK_SIZE)] + ["BAD_ID"]
+
+        with pytest.raises(ValueError, match="유효하지 않은 INDI_DSCM_NO"):
+            hana.load_table_to_duckdb(
+                "YK", "NHISBASE", storage, "YK",
+                where_clause="STD_YYYY = '2020'",
+                cohort_ids=cohort_ids,
+            )
+
+        storage.drop_table.assert_not_called()
+        hana.fetch_table_chunked.assert_not_called()
+
+    def test_rejects_one_shot_cohort_id_iterators_before_mutating_duckdb(self):
+        """사전 검증 후 재순회가 필요한 경로는 generator를 명확히 거부해야 한다."""
+        storage = MagicMock(spec=DuckDBStorage)
+        storage.conn = MagicMock()
+        hana = HANAConnector("localhost", 30015, "user", "pw")
+        cohort_ids = (str(i) for i in range(3))
+
+        with pytest.raises(TypeError, match="reusable"):
+            hana.load_table_to_duckdb(
+                "YK", "NHISBASE", storage, "YK",
+                where_clause="STD_YYYY = '2020'",
+                cohort_ids=cohort_ids,
+            )
+
+        storage.drop_table.assert_not_called()
+
+    def test_does_not_sort_entire_cohort_id_collection(self):
+        """대형 cohort_ids는 전체 정렬 복사 없이 스트리밍 chunking 되어야 한다."""
+        class NumericId:
+            def __init__(self, value):
+                self.value = value
+
+            def __str__(self):
+                return str(self.value)
+
+            def __lt__(self, other):  # sorted()를 호출하면 이 테스트가 실패한다.
+                raise AssertionError("cohort_ids 전체 정렬은 대형 코호트에서 MemoryError 원인")
+
+        parts = _cohort_id_where_parts([NumericId(3), NumericId(1), NumericId(2)])
+
+        assert len(parts) == 1
+        assert "'1'" in parts[0]
+        assert "'2'" in parts[0]
+        assert "'3'" in parts[0]
+
 
 class TestCohortIDExtractor:
     """CohortIDExtractor.extract() 핵심 로직 검증."""
@@ -1843,6 +2030,116 @@ class TestMonthlyJKExtractor:
         extractor = MonthlyJKExtractor(None, None, '/tmp')
         sql = extractor._build_join_sql('201301', cohort_ids=frozenset(['100', '200', '300']))
         assert "IN (" in sql
+
+    def test_build_join_sql_with_chunked_cohort_uses_or_not_and(self, monkeypatch):
+        """여러 IN 청크는 같은 컬럼을 동시에 만족할 수 없으므로 OR로 결합해야 한다."""
+        monkeypatch.setattr(_db_connector, '_COHORT_ID_CHUNK_SIZE', 2)
+        extractor = MonthlyJKExtractor(None, None, '/tmp')
+
+        sql = extractor._build_join_sql('201301', cohort_ids=frozenset(['100', '200', '300']))
+
+        assert "B.INDI_DSCM_NO IN (" in sql
+        assert ") OR B.INDI_DSCM_NO IN (" in sql
+        assert ") AND B.INDI_DSCM_NO IN (" not in sql
+
+    def test_build_join_sql_rejects_unvalidated_cohort_where_fragment(self):
+        """cohort_id_where_part는 내부 생성 형식만 허용해 raw SQL fragment 오용을 막는다."""
+        extractor = MonthlyJKExtractor(None, None, '/tmp')
+
+        with pytest.raises(ValueError, match='cohort_id_where_part'):
+            extractor._build_join_sql('201301', cohort_id_where_part="INDI_DSCM_NO IN ('100') OR 1=1 --")
+
+    def test_force_cache_cleanup_aborts_on_locked_jk_final_parquet_before_fetch(self, monkeypatch, tmp_path):
+        """JK force=True에서도 잠긴 final parquet가 있으면 HANA 재조회 전에 중단해야 한다."""
+        import pathlib
+
+        cache_dir = tmp_path / 'JK'
+        cache_dir.mkdir()
+        locked_cache = cache_dir / 'JK_201301.parquet'
+        pd.DataFrame({
+            'STD_YYYYMM': ['201301'], 'STD_YYYY': ['2013'], 'INDI_DSCM_NO': ['100'],
+            'SEX_TYPE': ['1'], 'BYEAR': ['1970'], 'GAIBJA_TYPE': ['1'],
+            'RVSN_ADDR_CD': ['11000'], 'FOREIGNER_Y': [None], 'SES05': [None],
+            'CALC_CTRB_VTILE_FD': [None], 'SURV_YR': [1], 'HHDT_DEATH': [None],
+        }).to_parquet(str(locked_cache), index=False)
+
+        original_unlink = pathlib.Path.unlink
+
+        def fake_unlink(self, *args, **kwargs):
+            if self == locked_cache:
+                raise PermissionError("locked by another process")
+            return original_unlink(self, *args, **kwargs)
+
+        monkeypatch.setattr(pathlib.Path, 'unlink', fake_unlink)
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_sql_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+
+        extractor = MonthlyJKExtractor(mock_hana, mock_storage, str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013,
+            'STUDY_END_YEAR': 2013,
+        }):
+            with pytest.raises(RuntimeError, match='잠긴 캐시'):
+                extractor.extract_all_months(force=True)
+
+        assert locked_cache.exists()
+        mock_hana.fetch_sql_chunked.assert_not_called()
+
+    def test_extract_all_months_streams_cohort_id_chunks_without_giant_or_sql(self, monkeypatch, tmp_path):
+        """대형 cohort_ids는 JK 월 SQL 하나에 모든 IN절을 OR로 합치지 않고 chunk별 조회해야 한다."""
+        monkeypatch.setattr(_db_connector, '_COHORT_ID_CHUNK_SIZE', 2)
+        mock_hana = MagicMock()
+        mock_hana.fetch_sql_chunked.return_value = iter([])
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 0
+
+        extractor = MonthlyJKExtractor(mock_hana, mock_storage, str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013,
+            'STUDY_END_YEAR': 2013,
+        }):
+            extractor.extract_all_months(force=True, cohort_ids=frozenset(['100', '200', '300']))
+
+        assert mock_hana.fetch_sql_chunked.call_count == 24
+        sql_texts = [call.args[0] for call in mock_hana.fetch_sql_chunked.call_args_list]
+        assert all(' OR B.INDI_DSCM_NO IN ' not in sql for sql in sql_texts)
+        assert all(sql.count('B.INDI_DSCM_NO IN (') == 1 for sql in sql_texts)
+
+    def test_extract_all_months_streaming_uses_stable_jk_schema_for_late_non_null_values(self, tmp_path):
+        """첫 chunk의 nullable 컬럼이 전부 NULL이어도 후속 chunk non-null 값 때문에 writer schema mismatch가 나면 안 된다."""
+        first = pd.DataFrame({
+            'STD_YYYYMM': ['201301'], 'STD_YYYY': ['2013'], 'INDI_DSCM_NO': ['100'],
+            'SEX_TYPE': ['1'], 'BYEAR': ['1970'], 'GAIBJA_TYPE': ['1'],
+            'RVSN_ADDR_CD': ['11000'], 'FOREIGNER_Y': [None], 'SES05': [None],
+            'CALC_CTRB_VTILE_FD': [None], 'SURV_YR': [1], 'HHDT_DEATH': [None],
+        })
+        second = pd.DataFrame({
+            'STD_YYYYMM': ['201301'], 'STD_YYYY': ['2013'], 'INDI_DSCM_NO': ['200'],
+            'SEX_TYPE': ['2'], 'BYEAR': ['1980'], 'GAIBJA_TYPE': ['2'],
+            'RVSN_ADDR_CD': ['26000'], 'FOREIGNER_Y': ['N'], 'SES05': ['5'],
+            'CALC_CTRB_VTILE_FD': ['3'], 'SURV_YR': [1], 'HHDT_DEATH': [None],
+        })
+
+        def fake_fetch(sql, key_col):
+            if "201301" in sql:
+                return iter([first, second])
+            return iter([])
+
+        mock_hana = MagicMock()
+        mock_hana.fetch_sql_chunked.side_effect = fake_fetch
+        mock_storage = MagicMock()
+        mock_storage.get_row_count.return_value = 2
+
+        extractor = MonthlyJKExtractor(mock_hana, mock_storage, str(tmp_path))
+        with patch.dict('config.STUDY_SETTINGS', {
+            'STUDY_START_YEAR': 2013,
+            'STUDY_END_YEAR': 2013,
+        }):
+            extractor.extract_all_months(force=True)
+
+        assert (tmp_path / 'JK' / 'JK_201301.parquet').exists()
 
     def test_extract_all_months_uses_cache(self, tmp_path):
         """force=False 시 기존 JK 캐시(≥5컬럼) 재사용."""

@@ -429,34 +429,48 @@ _INFRA_SETTINGS_KEYS = frozenset({
 
 
 def load_settings(path=None):
-    """JSON 파일에서 설정 복원"""
+    """JSON 파일에서 설정 복원.
+
+    로드된 사용자 설정은 즉시 검증하고, 검증 실패 시 기존 런타임 설정으로 되돌린다.
+    """
+    from copy import deepcopy
+
     p = Path(path) if path else _SETTINGS_FILE
     if not p.exists():
         return False
     data = json.loads(p.read_text(encoding='utf-8'))
-    for name, settings_dict in _SAVEABLE_SETTINGS.items():
-        if name in data:
-            for k, v in data[name].items():
-                if k in settings_dict and k not in _INFRA_SETTINGS_KEYS:
-                    # Restore Infinity
-                    if v == "Infinity":
-                        settings_dict[k] = float('inf')
-                    elif isinstance(v, list):
-                        settings_dict[k] = [(float('inf') if x == "Infinity" else x) for x in v]
-                    else:
-                        # 원래 타입 유지를 위해 type cast는 기본형만 적용
-                        orig = settings_dict[k]
-                        if orig is not None and not isinstance(v, type(orig)):
-                            try:
-                                settings_dict[k] = type(orig)(v)
-                            except (TypeError, ValueError):
-                                settings_dict[k] = v
+    snapshot = {name: deepcopy(settings_dict) for name, settings_dict in _SAVEABLE_SETTINGS.items()}
+    try:
+        for name, settings_dict in _SAVEABLE_SETTINGS.items():
+            if name in data:
+                for k, v in data[name].items():
+                    if k in settings_dict and k not in _INFRA_SETTINGS_KEYS:
+                        # Restore Infinity
+                        if v == "Infinity":
+                            settings_dict[k] = float('inf')
+                        elif isinstance(v, list):
+                            settings_dict[k] = [(float('inf') if x == "Infinity" else x) for x in v]
                         else:
-                            settings_dict[k] = v
-    # SAMPLING_SEED 범위 검증 (0-99 정수)
-    seed = STUDY_SETTINGS.get('SAMPLING_SEED', 42)
-    if not isinstance(seed, int) or not (0 <= seed <= 99):
-        raise ValueError(
-            f"SAMPLING_SEED는 0-99 범위의 정수여야 합니다. 현재 값: {seed}"
-        )
+                            # 원래 타입 유지를 위해 type cast는 기본형만 적용
+                            orig = settings_dict[k]
+                            if orig is not None and not isinstance(v, type(orig)):
+                                try:
+                                    settings_dict[k] = type(orig)(v)
+                                except (TypeError, ValueError):
+                                    settings_dict[k] = v
+                            else:
+                                settings_dict[k] = v
+        # SAMPLING_SEED 범위 검증 (0-99 정수)
+        seed = STUDY_SETTINGS.get('SAMPLING_SEED', 42)
+        if not isinstance(seed, int) or not (0 <= seed <= 99):
+            raise ValueError(
+                f"SAMPLING_SEED는 0-99 범위의 정수여야 합니다. 현재 값: {seed}"
+            )
+        _validate_study_settings()
+    except Exception:
+        for name, values in snapshot.items():
+            settings_dict = _SAVEABLE_SETTINGS[name]
+            settings_dict.clear()
+            settings_dict.update(values)
+        raise
     return True

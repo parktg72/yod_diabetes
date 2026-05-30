@@ -994,12 +994,13 @@ class HANAConnector:
 
         if chunk_size is None:
             chunk_size = chunk_controller.get_chunk('hana')
+        if cohort_ids:
+            _validate_cohort_ids(cohort_ids)
         first_chunk = True
         total = 0
 
         # cohort_ids 적용: 900개 단위 IN절로 분할 후 각 파트별 개별 조회
-        id_parts = _cohort_id_where_parts(cohort_ids)
-        fetch_parts = id_parts if id_parts else [None]
+        fetch_parts = _iter_cohort_id_where_parts(cohort_ids) if cohort_ids else [None]
 
         for id_part in fetch_parts:
             if id_part is not None:
@@ -1147,15 +1148,39 @@ class MonthlyHanaExtractor:
         table_upper = table_name.upper()
         cache_dir = self.cache_root / table_upper
         cache_dir.mkdir(parents=True, exist_ok=True)
+        if cohort_ids:
+            _validate_cohort_ids(cohort_ids)
 
         if force:
-            # 전체 재추출: 기존 Parquet 삭제
+            # 전체 재추출: 기존 Parquet 삭제. 단, 잠긴 final cache는 덮어쓰기 실패를
+            # 뒤늦게 만나지 않도록 HANA 재조회 전에 명확히 중단한다.
+            locked_final_cache = []
             for f in cache_dir.glob(f'{table_upper}_*.parquet'):
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(
+                        "%s force cache 삭제 실패 (%s): %s — 잠금 해제 후 수동 삭제 또는 덮어쓰기 재시도",
+                        table_upper, f, e
+                    )
+                    if not f.name.endswith('.tmp.parquet'):
+                        locked_final_cache.append(f)
+            if locked_final_cache:
+                raise RuntimeError(
+                    f"{table_upper}: 잠긴 캐시 Parquet 파일이 있어 force 재추출을 시작할 수 없습니다. "
+                    f"파일을 사용하는 앱/탐색기 미리보기/Python 프로세스를 닫고 재시도하세요: "
+                    f"{[str(p) for p in locked_final_cache]}"
+                )
         else:
             # resume 모드: 중단된 쓰기가 남긴 stale .tmp.parquet 정리
             for f in cache_dir.glob(f'{table_upper}_*.tmp.parquet'):
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(
+                        "%s resume stale tmp 삭제 실패 (%s): %s — 잠금 해제 후 수동 삭제 또는 다음 실행에서 재시도",
+                        table_upper, f, e
+                    )
 
         months = self._month_range()
         total = len(months)
@@ -1179,7 +1204,10 @@ class MonthlyHanaExtractor:
 
         # resume 모드: 기존 캐시 스키마 유효성 검사 (컬럼 수 < 5 이면 stale로 판단)
         if not force:
-            existing_cache = sorted(cache_dir.glob(f'{table_upper}_*.parquet'))
+            existing_cache = sorted(
+                f for f in cache_dir.glob(f'{table_upper}_*.parquet')
+                if not f.name.endswith('.tmp.parquet')
+            )
             if existing_cache:
                 try:
                     first_schema = pq.read_schema(existing_cache[0])
@@ -1223,15 +1251,15 @@ class MonthlyHanaExtractor:
             )
 
             # cohort_ids가 있으면 INDI_DSCM_NO IN(...) 조건을 900개 단위 청크로 추가
-            id_parts = _cohort_id_where_parts(cohort_ids)
 
             # 월별 청크를 PyArrow ParquetWriter로 스트리밍 저장 (메모리 효율)
             # Fix C7: try/finally로 ParquetWriter 안전 닫기
             writer = None
             month_rows = 0
+            close_failed = False
             try:
                 try:
-                    fetch_parts = id_parts if id_parts else [None]
+                    fetch_parts = _iter_cohort_id_where_parts(cohort_ids) if cohort_ids else [None]
                     for id_part in fetch_parts:
                         where_clause = (
                             f"{month_where} AND {id_part}" if id_part else month_where
@@ -1261,8 +1289,19 @@ class MonthlyHanaExtractor:
                     try:
                         writer.close()
                     except Exception as e:
+                        close_failed = True
+                        failed_months.append(yyyymm)
                         logger.error("ParquetWriter close 실패 (%s %s): %s", table_upper, yyyymm, e)
-                        tmp_path.unlink(missing_ok=True)
+                        try:
+                            tmp_path.unlink(missing_ok=True)
+                        except OSError as unlink_e:
+                            logger.warning(
+                                "ParquetWriter 실패 후 임시 파일 삭제 실패 (%s): %s — 다음 실행 전 정리 필요",
+                                tmp_path, unlink_e
+                            )
+
+            if close_failed:
+                continue
 
             if writer is None:
                 if schema_columns is None:
@@ -1300,6 +1339,12 @@ class MonthlyHanaExtractor:
                 f"{table_upper}: 전체 {total}개월 데이터가 0건입니다. "
                 f"MDCARE_STRT_YYYYMM 컬럼 타입 또는 HANA 접근 권한을 확인하세요. "
                 f"(컬럼 타입 감지 결과: {col_type!r})"
+            )
+
+        if not parquet_files:
+            raise RuntimeError(
+                f"{table_upper}: 유효한 Parquet 파일이 없습니다. "
+                f"월별 추출 실패 로그와 {cache_dir} 임시 파일 상태를 확인하세요."
             )
 
         # Parquet → DuckDB 병합 (단일 CREATE TABLE, union_by_name으로 컬럼 드리프트 대응)
@@ -1348,28 +1393,58 @@ _SICK_SYM_COLS = ('SICK_SYM1', 'SICK_SYM2', 'SICK_SYM3', 'SICK_SYM4', 'SICK_SYM5
 _COHORT_ID_CHUNK_SIZE = 900  # HANA IN 절 안전 상한
 
 
+def _reject_one_shot_cohort_ids(cohort_ids):
+    """사전 검증 후 재순회할 수 없는 generator/iterator 입력을 명확히 거부."""
+    if cohort_ids is not None and iter(cohort_ids) is cohort_ids:
+        raise TypeError("cohort_ids는 재순회 가능한 reusable collection이어야 합니다")
+
+
+def _validate_cohort_ids(cohort_ids):
+    """cohort_ids 전체를 정렬/복사 없이 사전 검증한다."""
+    if not cohort_ids:
+        return
+    _reject_one_shot_cohort_ids(cohort_ids)
+    for _id in cohort_ids:
+        id_str = str(_id)
+        if not re.match(r'^\d+$', id_str):
+            raise ValueError(f"유효하지 않은 INDI_DSCM_NO: {_id!r}")
+
+
+def _format_cohort_id_where_part(validated_ids):
+    quoted = ', '.join(f"'{_id}'" for _id in validated_ids)
+    return f"INDI_DSCM_NO IN ({quoted})"
+
+
+def _iter_cohort_id_where_parts(cohort_ids):
+    """cohort_ids를 정렬/전체복사 없이 _COHORT_ID_CHUNK_SIZE 단위 IN절로 yield."""
+    if not cohort_ids:
+        return
+    _reject_one_shot_cohort_ids(cohort_ids)
+
+    chunk = []
+    for _id in cohort_ids:
+        id_str = str(_id)
+        if not re.match(r'^\d+$', id_str):
+            raise ValueError(f"유효하지 않은 INDI_DSCM_NO: {_id!r}")
+        chunk.append(id_str)
+        if len(chunk) >= _COHORT_ID_CHUNK_SIZE:
+            yield _format_cohort_id_where_part(chunk)
+            chunk = []
+
+    if chunk:
+        yield _format_cohort_id_where_part(chunk)
+
+
 def _cohort_id_where_parts(cohort_ids):
     """cohort_ids를 _COHORT_ID_CHUNK_SIZE 단위로 나눈 IN-절 문자열 목록 반환.
 
     각 원소는 단독으로 AND 조건에 추가 가능한 문자열.
     cohort_ids가 None이거나 비어 있으면 빈 리스트 반환.
+
+    대형 코호트에서 sorted(cohort_ids)가 추가 메모리를 크게 쓰므로 입력 순서대로
+    스트리밍 chunking 한 뒤 호환성을 위해 list로 반환한다.
     """
-    if not cohort_ids:
-        return []
-    ids = sorted(cohort_ids)
-    parts = []
-    for i in range(0, len(ids), _COHORT_ID_CHUNK_SIZE):
-        chunk = ids[i:i + _COHORT_ID_CHUNK_SIZE]
-        # 환자 식별자는 반드시 숫자여야 함 — SQL 인젝션 및 데이터 무결성 방지
-        validated = []
-        for _id in chunk:
-            id_str = str(_id)
-            if not re.match(r'^\d+$', id_str):
-                raise ValueError(f"유효하지 않은 INDI_DSCM_NO: {_id!r}")
-            validated.append(id_str)
-        quoted = ', '.join(f"'{_id}'" for _id in validated)
-        parts.append(f"INDI_DSCM_NO IN ({quoted})")
-    return parts
+    return list(_iter_cohort_id_where_parts(cohort_ids))
 
 
 def _build_cohort_id_sql(
@@ -2112,10 +2187,16 @@ class MonthlyJKExtractor:
                 months.append(f"{y}{m:02d}")
         return months
 
-    def _build_join_sql(self, yyyymm, cohort_ids=None):
-        """월별 JK JOIN SQL 생성 (ORDER BY / LIMIT / OFFSET 미포함)."""
+    def _build_join_sql(self, yyyymm, cohort_ids=None, cohort_id_where_part=None):
+        """월별 JK JOIN SQL 생성 (ORDER BY / LIMIT / OFFSET 미포함).
+
+        cohort_id_where_part를 받으면 대형 cohort_ids 전체를 한 SQL에 OR로 합치지 않고
+        호출자가 chunk 단위로 스트리밍 조회할 수 있다.
+        """
         if not re.match(r'^\d{6}$', str(yyyymm)):
             raise ValueError(f"_build_join_sql: 유효하지 않은 yyyymm: {yyyymm!r}")
+        if cohort_ids is not None and cohort_id_where_part is not None:
+            raise ValueError("cohort_ids와 cohort_id_where_part는 동시에 지정할 수 없습니다")
         pop = f'"{self.pop_schema}"."{self.pop_table}"'
         dses = f'"{self.dses_schema}"."{self.dses_table}"'
         base_cond = (
@@ -2124,12 +2205,17 @@ class MonthlyJKExtractor:
             f"AND B.INDI_DSCM_NO IS NOT NULL "
             f"AND B.INDI_DSCM_NO < 90000000"
         )
-        id_parts = _cohort_id_where_parts(cohort_ids)
-        if id_parts:
-            cohort_cond = ' AND '.join(f"B.{p}" for p in id_parts)
-            where_clause = f"{base_cond} AND ({cohort_cond})"
+        if cohort_id_where_part:
+            if not re.fullmatch(r"INDI_DSCM_NO IN \('\d+'(, '\d+')*\)", cohort_id_where_part):
+                raise ValueError(f"cohort_id_where_part 형식이 유효하지 않습니다: {cohort_id_where_part!r}")
+            where_clause = f"{base_cond} AND B.{cohort_id_where_part}"
         else:
-            where_clause = base_cond
+            id_parts = _cohort_id_where_parts(cohort_ids)
+            if id_parts:
+                cohort_cond = ' OR '.join(f"B.{p}" for p in id_parts)
+                where_clause = f"{base_cond} AND ({cohort_cond})"
+            else:
+                where_clause = base_cond
 
         sql = f"""
 SELECT
@@ -2184,19 +2270,58 @@ WHERE {where_clause}
             pa.field('HHDT_DEATH', pa.string()),
         ])
 
+        def _jk_chunk_to_arrow_table(chunk_df):
+            """JK chunk를 고정 Arrow schema로 변환해 ParquetWriter schema drift를 방지."""
+            for field in _JK_PA_SCHEMA:
+                if field.name not in chunk_df.columns:
+                    chunk_df[field.name] = None
+            chunk_df = chunk_df[[field.name for field in _JK_PA_SCHEMA]]
+            return pa.Table.from_pandas(
+                chunk_df,
+                schema=_JK_PA_SCHEMA,
+                preserve_index=False,
+                safe=False,
+            )
+
         cache_dir = self.cache_root / 'JK'
         cache_dir.mkdir(parents=True, exist_ok=True)
+        if cohort_ids:
+            _validate_cohort_ids(cohort_ids)
 
         if force:
+            locked_final_cache = []
             for f in cache_dir.glob('JK_*.parquet'):
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(
+                        "JK force cache 삭제 실패 (%s): %s — 잠금 해제 후 수동 삭제 또는 덮어쓰기 재시도",
+                        f, e
+                    )
+                    if not f.name.endswith('.tmp.parquet'):
+                        locked_final_cache.append(f)
+            if locked_final_cache:
+                raise RuntimeError(
+                    "JK: 잠긴 캐시 Parquet 파일이 있어 force 재추출을 시작할 수 없습니다. "
+                    "파일을 사용하는 앱/탐색기 미리보기/Python 프로세스를 닫고 재시도하세요: "
+                    f"{[str(p) for p in locked_final_cache]}"
+                )
         else:
             for f in cache_dir.glob('JK_*.tmp.parquet'):
-                f.unlink()
+                try:
+                    f.unlink()
+                except OSError as e:
+                    logger.warning(
+                        "JK resume stale tmp 삭제 실패 (%s): %s — 잠금 해제 후 수동 삭제 또는 다음 실행에서 재시도",
+                        f, e
+                    )
 
         # resume 모드: 기존 캐시 스키마 유효성 검사 (컬럼 수 < 5 이면 stale)
         if not force:
-            existing = sorted(cache_dir.glob('JK_*.parquet'))
+            existing = sorted(
+                f for f in cache_dir.glob('JK_*.parquet')
+                if not f.name.endswith('.tmp.parquet')
+            )
             if existing:
                 try:
                     first_schema = pq.read_schema(existing[0])
@@ -2238,20 +2363,32 @@ WHERE {where_clause}
             )
 
             try:
-                base_sql = self._build_join_sql(yyyymm, cohort_ids=cohort_ids)
-                chunks = []
-                for chunk_df in self.hana.fetch_sql_chunked(base_sql, '"INDI_DSCM_NO"'):
-                    chunk_df = _prepare_chunk_for_duckdb(chunk_df)
-                    chunks.append(chunk_df)
+                fetch_parts = _iter_cohort_id_where_parts(cohort_ids) if cohort_ids else [None]
+                writer = None
+                month_rows = 0
+                try:
+                    for id_part in fetch_parts:
+                        base_sql = self._build_join_sql(
+                            yyyymm, cohort_id_where_part=id_part
+                        )
+                        for chunk_df in self.hana.fetch_sql_chunked(base_sql, '"INDI_DSCM_NO"'):
+                            chunk_df = _prepare_chunk_for_duckdb(chunk_df)
+                            table = _jk_chunk_to_arrow_table(chunk_df)
+                            if writer is None:
+                                writer = pq.ParquetWriter(str(tmp_path), table.schema)
+                            writer.write_table(table)
+                            month_rows += len(chunk_df)
+                            del chunk_df, table
+                            gc.collect()
+                finally:
+                    if writer is not None:
+                        writer.close()
 
-                if chunks:
-                    combined = pd.concat(chunks, ignore_index=True)
-                    table = pa.Table.from_pandas(combined, preserve_index=False)
-                    pq.write_table(table, str(tmp_path))
+                if month_rows:
                     tmp_path.rename(parquet_path)
                     parquet_files.append(parquet_path)
                     consecutive_failures = 0
-                    logger.debug("JK %s: %d행 저장", yyyymm, len(combined))
+                    logger.debug("JK %s: %d행 저장", yyyymm, month_rows)
                 else:
                     # 해당 월 데이터 없음 → 명시적 스키마 빈 parquet 저장 (resume 스킵용)
                     empty_table = pa.table(
@@ -2267,8 +2404,13 @@ WHERE {where_clause}
                 logger.warning("JK %s 추출 실패: %s — 건너뜁니다.", yyyymm, e)
                 failed_months.append(yyyymm)
                 consecutive_failures += 1
-                if tmp_path.exists():
-                    tmp_path.unlink()
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except OSError as unlink_e:
+                    logger.warning(
+                        "JK 실패 후 임시 파일 삭제 실패 (%s): %s — 다음 실행 전 정리 필요",
+                        tmp_path, unlink_e
+                    )
                 if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES:
                     raise RuntimeError(
                         f"JK 추출: {_MAX_CONSECUTIVE_FAILURES}개월 연속 실패 — HANA 연결 또는 테이블 설정을 확인하세요. "
