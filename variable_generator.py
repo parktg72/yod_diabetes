@@ -6,7 +6,7 @@ variable_generator.py - 공변량 생성 모듈
 import logging
 from config import DM_COMPLICATION_CODES, COMORBIDITY_CODES, CCI_CODES, STUDY_SETTINGS
 from memory_manager import mem_manager
-from utils import icd_like
+from utils import icd_like, sql_identifier
 import pandas as pd
 import numpy as np
 
@@ -14,8 +14,24 @@ logger = logging.getLogger(__name__)
 
 
 class VariableGenerator:
+    complete_case_critical_vars = [
+        'bmi',              # 보건검진 핵심
+        'income_quintile',  # 사회경제적 변수 핵심
+        'smoking_status',   # 문진 기본 변수
+    ]
+
     def __init__(self, data_manager):
         self.dm = data_manager
+
+    @staticmethod
+    def _sql_identifier(name):
+        """동적 SQL 식별자를 단일 identifier로 검증한다."""
+        return sql_identifier(name, allow_qualified=False)
+
+    @classmethod
+    def _derived_alias(cls, prefix, config_key):
+        """config dict key에서 파생되는 SELECT alias를 검증한다."""
+        return cls._sql_identifier(f"{prefix}_{str(config_key).lower()}")
 
     def assess_missing_data(self, cb=None):
         """분석 전 결측값 현황 진단. final_analysis 생성 후 호출."""
@@ -177,8 +193,9 @@ class VariableGenerator:
         selects = []
         for cname, codes in COMORBIDITY_CODES.items():
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
+            alias = self._derived_alias('comor', cname)
             # COALESCE: T40 미매칭 환자(기록 없음)는 합병증 없음(0)으로 처리
-            selects.append(f"COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS comor_{cname.lower()}")
+            selects.append(f"COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS {alias}")
 
         # _t40_pre_index 재사용 (T40 1회 스캔으로 3개 변수 그룹 생성)
         self.dm.execute(f"""
@@ -194,8 +211,9 @@ class VariableGenerator:
         selects = []
         for cname, codes in DM_COMPLICATION_CODES.items():
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
+            alias = self._derived_alias('comp', cname)
             # COALESCE: T40 미매칭 환자(기록 없음)는 합병증 없음(0)으로 처리
-            selects.append(f"COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS comp_{cname.lower()}")
+            selects.append(f"COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS {alias}")
 
         # _t40_pre_index 재사용
         self.dm.execute(f"""
@@ -238,10 +256,12 @@ class VariableGenerator:
         selects = []
         for cname, (codes, w) in CCI_CODES.items():
             cond = icd_like('t40.MCEX_SICK_SYM', codes)
+            alias = self._derived_alias('cci', cname)
             # COALESCE: T40 미매칭 환자는 해당 CCI 항목 0점으로 처리
-            selects.append(f"{w} * COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS cci_{cname.lower()}")
+            selects.append(f"{w} * COALESCE(MAX(CASE WHEN {cond} THEN 1 ELSE 0 END), 0) AS {alias}")
 
-        sums = ' + '.join(f"COALESCE(cci_{c.lower()},0)" for c in CCI_CODES)
+        cci_aliases = [self._derived_alias('cci', c) for c in CCI_CODES]
+        sums = ' + '.join(f"COALESCE({alias},0)" for alias in cci_aliases)
 
         # _t40_pre_index 재사용
         self.dm.execute(f"""
@@ -260,11 +280,7 @@ class VariableGenerator:
 
     def _apply_complete_case_strategy(self, cb=None):
         """complete_case 결측값 처리 실행"""
-        critical_vars = [
-            'bmi',              # 보건검진 핵심
-            'income_quintile',  # 사회경제적 변수 핵심
-            'smoking_status',   # 문진 기본 변수
-        ]
+        critical_vars = [self._sql_identifier(v) for v in self.complete_case_critical_vars]
         null_conditions = ' OR '.join(f"{v} IS NULL" for v in critical_vars)
 
         before_count = self.dm.storage.get_row_count('final_analysis')
