@@ -349,8 +349,11 @@ class DuckDBStorage:
         if not index_name:
             index_name = f"idx_{table_name}_{'_'.join(columns)}"
         _validate_table_name(index_name)
+        quoted_index = _quote_identifier(index_name)
+        quoted_table = _quote_identifier(table_name)
+        quoted_columns = ', '.join(_quote_identifier(col) for col in columns)
         try:
-            self.execute(f"CREATE INDEX IF NOT EXISTS {index_name} ON {table_name}({', '.join(columns)})")
+            self.execute(f"CREATE INDEX IF NOT EXISTS {quoted_index} ON {quoted_table}({quoted_columns})")
         except Exception as e:
             logger.warning(f"인덱스 생성 실패 ({index_name}): {e}")
 

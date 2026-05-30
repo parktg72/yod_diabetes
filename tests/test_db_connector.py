@@ -1,5 +1,6 @@
 """db_connector.py 검증 함수 단위 테스트"""
 
+import logging
 import pytest
 import sys
 from pathlib import Path
@@ -60,6 +61,21 @@ class TestValidateTableName:
     def test_invalid_dot(self):
         with pytest.raises(ValueError, match="유효하지 않은 테이블명"):
             _validate_table_name("schema.table")
+
+
+def test_create_index_quotes_keyword_identifiers(tmp_path, caplog):
+    """DuckDB 키워드와 겹치는 내부 식별자도 인용해서 인덱스를 생성한다."""
+    storage = DuckDBStorage(str(tmp_path / "keyword_index.duckdb"))
+    storage.connect()
+    storage.execute('CREATE TABLE "select" ("from" INTEGER)')
+
+    with caplog.at_level(logging.WARNING):
+        storage.create_index("select", ["from"])
+
+    assert "인덱스 생성 실패" not in caplog.text
+    indexes = storage.execute_df("SELECT index_name FROM duckdb_indexes() WHERE table_name = ?", ["select"])
+    assert "idx_select_from" in set(indexes["index_name"])
+    storage.close()
 
 
 class TestValidateWhereClause:
