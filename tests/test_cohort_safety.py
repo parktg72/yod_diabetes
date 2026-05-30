@@ -2,7 +2,7 @@
 import time
 import pytest
 import duckdb
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 from cohort_builder import CohortBuilder
 from utils import CohortStepError
 
@@ -168,3 +168,15 @@ def test_build_cohort_stops_on_step_failure(mock_sleep):
     assert step2_called['v'] is False
     assert exc_info.value.step == 1
     mock_sleep.assert_called_once_with(1)
+
+
+def test_sensitivity_analysis_rejects_invalid_days_before_any_sql_execute():
+    """민감도 분석 table suffix 입력이 unsafe하면 부분 테이블 생성 없이 즉시 거부한다."""
+    dm = MockDM()
+    dm.execute = MagicMock()
+    builder = make_builder(dm)
+
+    with pytest.raises(ValueError, match="lookback_days"):
+        builder.sensitivity_analysis([60, "90; DROP TABLE exposure_groups"])
+
+    dm.execute.assert_not_called()

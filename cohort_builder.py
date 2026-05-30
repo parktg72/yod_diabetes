@@ -224,9 +224,7 @@ class CohortBuilder:
             table_suffix: 테이블명 접미사 (민감도 분석용, 예: "_60day")
         """
         table_name = sql_identifier(f"med_pattern{table_suffix}", allow_qualified=False)
-        lookback_days = int(lookback_days)
-        if lookback_days < 0:
-            raise ValueError(f"lookback_days는 0 이상이어야 합니다: {lookback_days!r}")
+        lookback_days = self._validate_lookback_days(lookback_days)
         self.dm.execute(f"""
             CREATE OR REPLACE TABLE {table_name} AS
             SELECT m.INDI_DSCM_NO,
@@ -242,6 +240,17 @@ class CohortBuilder:
               AS VARCHAR), '-', '')
             GROUP BY m.INDI_DSCM_NO
         """)
+
+    @staticmethod
+    def _validate_lookback_days(lookback_days):
+        """민감도/약물패턴 lookback day 입력을 정수 0 이상으로 정규화한다."""
+        try:
+            days = int(lookback_days)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"lookback_days는 정수여야 합니다: {lookback_days!r}") from exc
+        if days < 0:
+            raise ValueError(f"lookback_days는 0 이상이어야 합니다: {lookback_days!r}")
+        return days
 
     def step4_classify_groups(self, cb=None, lookback_days: int = 90):
         """노출군 분류: 외래2회+/입원1회+, T1+T2 동시보유 제외"""
@@ -745,6 +754,10 @@ class CohortBuilder:
         """
         if lookback_days_list is None:
             lookback_days_list = [60, 90, 180]
+
+        lookback_days_list = [
+            self._validate_lookback_days(days) for days in lookback_days_list
+        ]
 
         logger.info(f"민감도 분석: 약물 집계 기간 {lookback_days_list}일 비교 시작")
         results = {}
