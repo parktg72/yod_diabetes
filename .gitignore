@@ -1,21 +1,29 @@
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-*.spec
+# Local AI/IDE workspace state
+.antigravitycli/
+.claude/
+.omc/
+*.code-workspace
+
+# OS metadata / AppleDouble files
 .DS_Store
 ._*
-*.duckdb
-*.duckdb.wal
-temp_duckdb/
-work/
-results/
-*.log
+"._\"memory\""
+
+# Python/runtime caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
 venv/
-.env
-.omc/
-.claude/
-*.sas7bdat
+
+# Build/output artifacts
+build/
+dist/
+
+# Local analysis/cache outputs
 hana_cache/
+_temp_duckdb/
