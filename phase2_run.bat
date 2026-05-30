@@ -1,9 +1,9 @@
 @echo off
+chcp 65001 > nul
 REM Phase 2 Final Report 실행 스크립트 (Windows CMD)
 REM 사용: phase2_run.bat [db_path] [output_dir]
 REM 예시: phase2_run.bat nhis_analysis.duckdb phase2_output
 
-chcp 65001 > nul
 cd /d "%~dp0"
 if errorlevel 1 (
     echo [ERROR] 스크립트 폴더로 이동 실패: %~dp0

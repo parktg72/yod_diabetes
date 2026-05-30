@@ -1,4 +1,4 @@
-# Windows 배치 파일은 항상 CRLF 줄바꿈 유지 (UTF-8 BOM으로 한글 지원)
+# Windows 배치 파일은 항상 CRLF 줄바꿈 유지 (UTF-8 한글 지원)
 *.bat text eol=crlf
 *.cmd text eol=crlf
 
@@ -6,3 +6,6 @@
 *.py  text eol=lf
 *.txt text eol=lf
 *.md  text eol=lf
+
+# 패키지/종속성 설치 파일은 Windows CMD 안내 문구 호환을 위해 CRLF 유지
+requirements*.txt text eol=crlf
